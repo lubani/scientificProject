@@ -6,3 +6,6 @@ PyQt5~=5.15.7
 setuptools~=58.1.0
 scipy~=1.9.0
 mpmath~=1.2.1
+wheel~=0.37.1
+tensorflow~=2.10.0
+keras~=2.10.0
