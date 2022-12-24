@@ -1,169 +1,142 @@
-from math import inf
+import math
+from math import inf, floor
 
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import animation
-# Import the mplot3d library from matplotlib
 from mpl_toolkits import mplot3d
-from numpy import ma
+from numpy import ma, NaN
 
-
-def effectiveSpecificHeat(T, Ql, c):
-    if T < 1373 or T > 1653:
-        return c
-    else:
-        return c + Ql
-
-
-def calcHeatCap(temp):
-    return 670 + 1e3 * ((temp - 250) / 530.6) - 1e3 * ((temp - 250) / 498.7) ** 2
-
-
-def calcThermalConductivity(temp):
-    c1 = 1.281 * 1e-2
-    c2 = 4.431 * 1e-10
-    return c1 + c2 * temp ** 3
-
-
-def calcSpecificHeat(temp):
-    return -1848.5 + 1047.41 * ma.log(temp)
-
-
-def alpha(k, c, rho):
-    return k / (c * rho)
-
-
-# Set the time for which you want to plot the temperature distribution
-time = 0.5  # time in seconds
-
-# Stefan problem parameters
 L = 1.0  # length of the bar (m)
 LH = 1429  # latent heat of fusion
 T = 253  # initial temperature of the bar (K)
-T_m = 1429  # melting temperature (K)
+T_m = 1373  # melting temperature (K)
+rho = 1.7  # density (kg/m^3)
 
-rho = 1700.0  # density (kg/m^3)
-
-c = calcSpecificHeat(T)  # specific heat capacity (J/kgK)
-k = calcThermalConductivity(T)  # thermal conductivity (W/mK)
 # Finite differences parameters
 dx = 0.01  # spatial step size (m)
 dt = 0.001  # time step size (s)
 
 # Number of time steps
-n_steps = 10000
-# Initialize the temperature, solid-liquid interface, and heat flux arrays
-# We assume that the temperature is uniform throughout the PCM at start.
-T_arr = np.zeros((n_steps, int(L / dx)))
-T_arr[0, :] = T
-T_arr[0, 0] = T_m
-s_arr = np.zeros(n_steps)
-s_arr[:] = L
+n_steps = 1000
+timer = 10
 
-heat_flux_arr = np.zeros((n_steps, int(L / dx)))
 
-# Set the initial solid-liquid interface and the width of the mushy zone
-mushy_zone_width = 0.01  # width of the mushy zone in meters
+def calcHeatCap(temp):
+    c = 670 + 1000 * ((temp - 250) / 530.6) - 1000 * ((temp - 250) / 498.7) ** 2
+    # print(f'c = {c}')
+    # print(f'temp = {temp}')
+    return c
 
-for i in range(1, n_steps):
-    if s_arr[i - 1] == inf:
-        s = len(T_arr[i - 1]) - 1
+
+def calcThermalConductivity(temp):
+    return 0.0128 + 5.1e-8 * temp ** 2 - 2.4e-4 * temp + 0.15
+
+
+def calcSpecificHeat(temp):
+    c = -1848.5 + 1047.41 * ma.log(temp)
+    return c
+
+
+def alpha(k, c, rho):
+    if np.isnan(k) or np.isnan(c):
+        return 1
+    return k / (c * rho)
+
+
+def effectiveSpecificHeat(T, Ql, c):
+    if np.logical_or(T < 1373, T > 1653).any():
+        return c
     else:
-        s = int(s_arr[i - 1] / dx)
-    # # Check if the solid-liquid interface is within the valid range for the T_arr array
-    # if s < 0:
-    #     s = 0
-    # elif s >= len(T_arr[i - 1]):
-    #     s = len(T_arr[i - 1]) - 1
+        return c + Ql
 
-    # Update the heat flux at each point in the bar
-    heat_flux_arr[i, 1:-1] = -k * (T_arr[i, 2:] - T_arr[i, :-2]) / (2 * dx)
-    #  update the heat flux at the left end
-    heat_flux_arr[i, 0] = k * (T_arr[i, 0] - T) / dx
-    # update the heat flux at the right end
-    heat_flux_arr[i, -1] = k * (T_m - T_arr[i, -1]) / dx
-    print(f'heat flux array = {heat_flux_arr}')
-    # Calculate the enthalpy at the solid-liquid interface
-    if s < len(T_arr[i - 1]):
-        H = heat_flux_arr[i - 1, s] / (T_m - T_arr[i - 1, s])
-        print("T_arr[i - 1, s] = ", T_arr[i - 1, s])
+
+def calcTemperature(x, t):
+    if t == 0:
+        return T
+    elif x == 0:
+        return T_m
     else:
-        H = heat_flux_arr[i - 1, -1] / (T_m - T_arr[i - 1, -1])
-        print("T_arr[i - 1, s] = ", T_arr[i - 1, -1])
-    print(f'H = {H}')
-    # Update the temperature at each point in the bar
-    T_arr[i, 1:-1] = T_arr[i - 1, 1:-1] + dt * k * (
-            T_arr[i - 1, 2:] - 2 * T_arr[i - 1, 1:-1] + T_arr[i - 1, :-2]) / dx ** 2
-    # Set the boundary conditions
-    T_arr[:, 0] = T_m  # left end of the bar
-    T_arr[:, -1] = T  # right end of the bar
-    # Update the temperature in the mushy zone
-    width = int(mushy_zone_width / dx)
-    if s - width < 0:
-        s = width
-        T_arr[i, 0:s + width] = np.linspace(T_arr[i, 0], T_arr[i, s + width], s + width)
-    elif s + width >= len(T_arr[i - 1]):
-        s = len(T_arr[i - 1]) - width - 1
-        T_arr[i, s - width:len(T_arr[i])] = np.linspace(T_arr[i, s - width], T_arr[i, -1], len(T_arr[i]) - s + width)
+        return T_m - (T_m - T) * math.erf(x / (2 * math.sqrt(
+            alpha(calcThermalConductivity(T),
+                  calcSpecificHeat(T), rho) * t)))
+
+
+def calcEnthalpy(x, t):
+    temper = calcTemperature(x, t)
+    if temper < T_m:
+        return rho * calcSpecificHeat(temper) * (temper - T_m)
+    elif np.isclose(temper, T_m).any():
+        return LH
     else:
-        T_arr[i, s - width:s + width] = np.linspace(T_arr[i, s - width], T_arr[i, s + width], 2 * width + 1)
-    # Update the position of the solid-liquid interface
-    s_arr[i] = s_arr[i - 1] + dt * width
+        return rho * calcSpecificHeat(temper) * (temper - T_m) + rho * LH
 
-ts = 1000
-# Generate x and y coordinates for the points on the surface
-x = np.linspace(0, L, int(L / dx))
-t = np.linspace(0, ts, n_steps)
-X, times = np.meshgrid(x, t)
 
-# Generate a 3D surface plot using the temperature values from the T_arr array
+def calcHeatFlux(x, t, E_interface, T_m, k):
+    # Calculate the temperature at the interface using the calcTemperature function
+    T_interface = calcTemperature(x, t)
+
+    # Compute the heat flux at the interface
+    heat_flux_interface = -k * (T_interface - T_m) / dx
+
+    return heat_flux_interface
+
+
+def boundary_condition(x, t):
+    E = t + (x ** 2) / 2
+    if E < 0:
+        # Set enthalpy to 0 and temperature to T_m
+        E = 0
+        T = T_m
+    else:
+        # Calculate temperature using calcTemperature function
+        T = calcTemperature(E, rho)
+    return T
+
+
+# The enthalpy method is a way of solving the Stefan problem, which is a mathematical model for the process of
+# solid-liquid phase change (melting or freezing). In the enthalpy method, the enthalpy (a measure of the total
+# thermal energy of a substance) is used as a variable to represent the temperature distribution in the system. The
+# enthalpy function is a nonlinear version of the heat equation, and it is solved numerically using a finite
+# difference scheme.
+
+x_arr = np.linspace(0, L, n_steps)
+t_arr = np.linspace(0, timer, n_steps)
+print(f'x = {x_arr}, t = {t_arr}')
+# x, t = np.meshgrid(x_arr, t_arr)
+E_arr = np.empty((n_steps, n_steps))
+T_arr = np.empty_like(E_arr)
+for j, t_val in enumerate(t_arr):
+    for i, x_val in enumerate(x_arr):
+        E_arr[i, j] = calcEnthalpy(x_val, t_val)
+        T_arr[i, j] = calcTemperature(x_val, t_val)
+
+# Plot the temperature vs. enthalpy values
+plt.plot(E_arr, T_arr)
+plt.xlabel('Enthalpy (J/kg)')
+plt.ylabel('Temperature (K)')
+plt.show()
+plt.savefig('enthalpy.png')
+
 fig = plt.figure()
-ax = plt.axes(projection="3d")
-ax.plot_surface(X, times, T_arr, cmap='coolwarm')
+ax = fig.add_subplot(111, projection='3d')
 
-ax.set_xlabel('x (m)')
-ax.set_ylabel('t (s)')
-ax.set_zlabel('T (K)')
-plt.show()
-
-
-# Code to generate the initial plot, including creating the figure and axes object
-def plot_function():
-    # Create the initial 3D surface plot using the x, t, and T_arr arrays
-    ax.plot_surface(X, times, T_arr, cmap='coolwarm')
-    ax.set_xlabel('x (m)')
-    ax.set_ylabel('t (s)')
-    ax.set_zlabel('T (K)')
-
-    # Return the updated plot
-    return ax
-
-
-def update_function(i):
-    # Rotate the plot around the y-axis by a given angle
-    ax.view_init(elev=10., azim=i * 4)
-
-    # Return the updated plot
-    return ax
-
-
-plt.show()
-
-# Calculate the temperature distribution at the given time
-# x = np.linspace(0, L, int(L / dx))  # position array in meters
-T_dist = T_arr[int(time / dt), :]  # temperature distribution array in Kelvins
-
-# Plot the temperature distribution
-plt.plot(x, T_dist)
+# Plot the surface with x = x, y = t, and z = T_arr
+ax.plot_surface(x_arr, t_arr, T_arr, cmap='coolwarm')
 plt.xlabel('x (m)')
-plt.ylabel('T (K)')
+plt.ylabel('t (s)')
+
+# Function to update the plot at each frame of the animation
+def update(num):
+    ax.view_init(elev=10., azim=num)
+
+
+# Create the animation
+anim = animation.FuncAnimation(fig, update, frames=np.arange(0, 360, 2),
+                               interval=100)
+
+# Show the plot
+
 plt.show()
-
-print("s_arr = ", s_arr)
-print("T_arr = ", T_arr)
-
-# Code to generate the initial plot, including creating the figure and axes object
-# Use FuncAnimation to create the animation, passing it the Animation object, figure, and update function
-animation = animation.FuncAnimation(fig, update_function, init_func=plot_function, frames=100)
-# Save the animation to a file
-animation.save('stefan_problem1.gif', fps=20)
+# Save the animation to a GIF file
+anim.save('animation.gif', writer='Pillow', fps=30)
