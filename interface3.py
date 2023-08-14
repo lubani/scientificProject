@@ -4,6 +4,9 @@ import google
 import logging
 from matplotlib import pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+from tkinter import ttk
+
 import backend
 from backend import *
 
@@ -157,23 +160,44 @@ class App:
             self.input_window.destroy()
             self.pcm = globals()[self.material]()
 
-        # instead of self.pcm=Iron(),
-        # add functionality to determine if string is "Iron" then return object of classs Iron(),
-        # same for "Regolith" and class Regolith()
-
+        # Create the main window
         self.root = tk.Tk()
+        self.root.wm_title("Embedding in Tk")
+        # self.root.geometry("1200x800")
         self.root.configure(bg='white')
         self.root.title("Heat Conduction")
         self.root.grid_anchor("center")
 
+        # Create a frame to hold the scale and the line plot
+        self.frame = tk.Frame(self.root)
+        self.frame.grid(row=0, column=0, columnspan=2, sticky='n')  # Span the frame across columns
+
+        # Create the scale widget
+        self.time_scale = tk.Scale(self.root, from_=0, to=self.t_max, resolution=self.pcm.dt,
+                                   orient=tk.HORIZONTAL, command=self.update_time)
+        # Position the scale at the top of the frame
+        self.time_scale.grid(row=0, column=0, sticky='n')
+
+        # Create a variable for the dropdown selection
+        self.solution_type = tk.StringVar(self.root)
+        self.solution_type.set("Implicit")  # default value
+
+        # Create the dropdown menu
+        solution_menu = tk.OptionMenu(self.frame, self.solution_type,
+                                      "Implicit", "Numerical", "Analytical")
+        solution_menu.grid(row=0, column=1, sticky='n')  # Position the dropdown menu at the top center
+        # Link the update function to the variable
+        self.solution_type.trace('w', self.update_solution_type)
+
         self.root.focus_force()
+
         # Create the 2D line plot
         self.fig1, self.ax1 = plt.subplots(figsize=(4, 3), dpi=100)
         self.ax1.set_title("T(E) Line Plot")
         self.ax1.set_xlabel("E")
         self.ax1.set_ylabel("T")
         self.canvas1 = FigureCanvasTkAgg(self.fig1, self.root)
-
+        self.canvas1.draw()
         self.fig2 = plt.Figure(figsize=(4, 3), dpi=100)
         self.ax2 = self.fig2.add_subplot(111, projection='3d')
         self.ax2.set_title("3D Surface Plot")
@@ -181,85 +205,147 @@ class App:
         self.ax2.set_ylabel("t")
         self.ax2.set_zlabel("T")
         self.canvas2 = FigureCanvasTkAgg(self.fig2, self.root)
-        self.fig3 = plt.Figure(figsize=(4, 3), dpi=100)
 
+        # self.fig3 = plt.Figure(figsize=(4, 3), dpi=100)
+        # self.ax3 = self.fig3.add_subplot(111)
+        # self.ax3.set_title("T(x) Line Plot")
+        # self.ax3.set_xlabel("x")
+        # self.ax3.set_ylabel("T")
+        # self.canvas3 = FigureCanvasTkAgg(self.fig3, self.root)
+
+
+        # Create the line plot
+        self.fig3 = plt.Figure(figsize=(5, 5), dpi=100)
         self.ax3 = self.fig3.add_subplot(111)
-        self.ax3.set_title("T(x) Line Plot")
-        self.ax3.set_xlabel("x")
-        self.ax3.set_ylabel("T")
-        self.canvas3 = FigureCanvasTkAgg(self.fig3, self.root)
+        self.ax3.grid(True)
+        self.ax3.set_xlabel("x [m]")
+        self.ax3.set_ylabel("T [C]")
+        self.ax3.set_title("T(x)")
+        # Create the canvas for the line plot and position it at the top of the frame
+        self.canvas3 = FigureCanvasTkAgg(self.fig3, master=self.root)  # A tk.DrawingArea.
+        self.canvas3.draw()
+        self.canvas3.get_tk_widget().grid(row=1, column=1, sticky='nsew')
+        # Create lines for temperature and enthalpy
+        self.line1, = self.ax1.plot([], [], 'r-', label='Line Plot 1')  # Notice the comma
+        # self.line2, = self.ax3.plot([], [], 'b-', label='H(x)')  # Notice the comma
+        self.line3, = self.ax3.plot([], [], 'g-', label='Line Plot 3')  # Notice the comma
+
+        self.ax3.legend()
+
+        # Configure the frame to give all extra space to the line plot
+        self.frame.grid_rowconfigure(0, weight=1)
+        self.frame.grid_columnconfigure(0, weight=1)
 
         # Create the text widget and add the contents of the file
         self.text_output = tk.Text(self.root)
+        self.v = tk.Scrollbar(self.root, orient='vertical')
+        # Grid the widgets
+        self.canvas1.get_tk_widget().grid(row=1, column=0, sticky='nsew')
+        self.canvas2.get_tk_widget().grid(row=2, column=0, sticky='nsew')
+        self.text_output.grid(row=2, column=1, sticky='nsew')
 
-        # Pack the widgets using grid
-        self.canvas1.get_tk_widget().grid(row=0, column=0)
-        self.canvas2.get_tk_widget().grid(row=1, column=0)
-        self.canvas3.get_tk_widget().grid(row=0, column=1)
-        self.text_output.grid(row=1, column=1)
-        self.continue_init()
+        # Configure the main window to distribute extra space among the widgets
+        self.root.grid_rowconfigure(0, weight=1)
+        self.root.grid_columnconfigure(0, weight=1)
+        self.root.grid_rowconfigure(1, weight=1)
+        self.root.grid_columnconfigure(1, weight=1)
+        self.root.grid_rowconfigure(2, weight=1)
+        self.root.grid_columnconfigure(2, weight=1)
 
-    def continue_init(self):
-        self.t_arr = np.linspace(0, self.t_max, 10)
-        self.x_arr = np.linspace(0, self.L, 10)
-
-        self.E_arr = np.zeros((len(self.x_arr), len(self.t_arr)))
-        self.T_arr = np.ones_like(self.E_arr) * self.pcm.T_m
-
-        # self.T_arr[:, 0] = self.pcm.T_m
-        self.T_arr[0, :] = self.pcm.T
         self.calcAll()
 
     def calcAll(self):
-        self.T_arr = self.pcm.calcTemperature(self.x_arr, self.t_arr, self.T_arr, self.pcm)
-        for i in range(len(self.x_arr)):
-            for j in range(len(self.t_arr)):
-                self.E_arr[i, j] = self.pcm.calcEnthalpy2(self.T_arr[i, j], self.pcm)
-        self.T_arr = np.where(np.isnan(self.T_arr), self.pcm.T_m, self.T_arr)
+        selected_solution = self.solution_type.get()
         self.x_arr2 = np.arange(0, self.L + self.pcm.dx, self.pcm.dx)
-        self.t_arr2 = np.arange(0, self.t_max + self.pcm.dt, self.pcm.dt)
-        with open("matrix.txt", "w+") as f:
-            f.write(f'length intervals = {self.x_arr2}\n')
-            print(f'length intervals = {self.x_arr2}')
-            f.write(f'time intervals = {self.t_arr2}\n')
-            print(f'time intervals = {self.t_arr2}')
-        self.T_vec, self.T_arr2, self.t_arr3 = self.pcm.calcTemperature3(self.x_arr2, self.t_max, self.pcm)
-        print(f'temperature vector at final time = {self.T_vec}')
-        self.update_line_plot3(self.x_arr2, self.T_vec)
-        T_vec_explicit = np.empty_like(self.T_vec)
-        for i, val in enumerate(self.x_arr2):
-            T_vec_explicit[i] = self.pcm.explicitSol(val, self.t_max, self.pcm)
-        with open("matrix.txt", "a+") as f:
-            f.write(f'\ntemperature by error function at the last recorded time = {T_vec_explicit}\n')
-        print(f'temperature by error function at final time = {T_vec_explicit}')
-        self.t_arr4 = np.linspace(0, self.t_max, len(self.x_arr2))
-        self.update_line_plot(self.E_arr, self.T_arr)
-        print(f'{self.x_arr2.shape}, {self.t_arr3.shape}, {self.T_arr2.shape}')
-        self.update_surface_plot(self.x_arr2, self.t_arr3, self.T_arr2)
-        self.update_line_plot3(self.x_arr2, self.T_vec)
-        with open("matrix.txt", "r") as f:
-            content = f.read()
-            self.text_output.insert(tk.END, content)
+        self.t_arr2 = np.arange(self.pcm.dt, self.t_max, self.pcm.dt)
+        # Compute both solutions (only once)
 
-        # Wait until the window is closed before continuing execution
-        self.root.wait_window()
-        self.run()
+        self.T_arr_numerical, self.t_arr3 = self.pcm.calcTemperature3(self.x_arr2, self.t_max, self.pcm)
+        self.T_arr_analytical = self.pcm.explicitSol(self.x_arr2, self.t_arr2, self.pcm)
+        self.T_arr_implicit, self.t_arr4 = self.pcm.implicitSol(self.x_arr2, self.t_max, self.pcm)
+        # Call update_plots to display the selected solution
+        self.update_solution_type()
+
+    def update_solution_type(self, *args):
+        selected_solution = self.solution_type.get()
+        if selected_solution == "Analytical":
+            self.T_arr_to_display = self.T_arr_analytical
+            self.t_arr_final = self.t_arr2
+        elif selected_solution == "Numerical":
+            self.T_arr_to_display = self.T_arr_numerical
+            self.t_arr_final = self.t_arr3
+        elif selected_solution == "Implicit":
+            self.T_arr_to_display = self.T_arr_implicit
+            self.t_arr_final = self.t_arr4
+
+        # Update the 'to' parameter of the time scale widget
+        self.time_scale.config(to=self.t_arr_final[-1])
+
+        # Call update_plots to update the plots based on the selected solution type
+        self.update_plots()
+
+    def update_plots(self):
+
+        # Get the current time index from the timescale widget
+        t_idx = int(self.time_scale.get())
+        t_idx = t_idx if t_idx < self.T_arr_to_display.shape[1] else self.T_arr_to_display.shape[1] - 1
+
+        # Update line plot 3 using the selected time index
+        self.update_line_plot3(self.x_arr2, self.T_arr_to_display[:, t_idx])
+
+        self.H_arr = self.pcm.calcEnthalpy2(self.T_arr_to_display, self.pcm)
+        print("H values from calcEnthalpy2:", self.H_arr)
+
+        self.energy_sufficiency = self.pcm.calcEnergySufficiency(self.H_arr)
+        self.update_line_plot(self.H_arr[:, t_idx], self.T_arr_to_display[:, t_idx])
+        self.update_surface_plot(self.x_arr2, self.t_arr_final, self.T_arr_to_display)
+        self.canvas1.draw()
+        self.canvas2.draw()
+        self.canvas3.draw()
+        # Update the text widget with the contents of the file
+        # with open("matrix.txt", "r") as f:
+        #     content = f.read()
+        #     self.text_output.insert(tk.END, content)
+
+        # # Wait until the window is closed before continuing execution
+        # self.v.config(command=self.text_output.yview)
+        # self.text_output["yscrollcommand"] = self.v.set
+        # self.v.grid(row=1, column=2, sticky='ns')
+        # self.root.wait_window()
+        # self.run()
 
     def update_line_plot(self, x, y):
-        self.line1 = self.ax1.plot(x, y)
+        self.line1.set_data(x, y)
         self.ax1.relim()
+        self.ax1.set_xlim([np.min(x), np.max(x)])
+        self.ax1.set_ylim([np.min(y), np.max(y)])
         self.ax1.autoscale_view()
         self.canvas1.print_figure("TE.png")
         self.canvas1.draw()
 
     def update_line_plot3(self, x, y):
-        self.line3 = self.ax3.plot(x, y)
+        self.line3.set_data(x, y)
         self.ax3.relim()
         self.ax3.autoscale_view()
         self.canvas3.print_figure("Tx.png")
         self.canvas3.draw()
 
+    def update_time(self, event):
+        t_idx = int(self.time_scale.get())
+        self.t_idx = t_idx if t_idx < self.T_arr_to_display.shape[1] else self.T_arr_to_display.shape[1] - 1
+
+        self.line1.set_ydata(self.H_arr[:, self.t_idx])
+        self.ax1.relim()
+        self.ax1.autoscale_view()
+        self.canvas1.draw()
+
+        self.line3.set_ydata(self.T_arr_to_display[:, self.t_idx])
+        self.ax3.relim()
+        self.ax3.autoscale_view()
+        self.canvas3.draw()
+
     def update_surface_plot(self, x, y, z):
+        self.ax2.clear()
         x, y = np.meshgrid(x, y)
         self.surface = self.ax2.plot_surface(x, y, np.transpose(z), cmap='coolwarm')
         self.canvas2.print_figure("Txt.png")
@@ -268,10 +354,11 @@ class App:
     def run(self):
         self.root.mainloop()
 
-
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     if int(os.environ.get("PRODUCTION", 0)) == 1:
         logging_client = google.cloud.logging.Client()
         logging_client.setup_logging()
     app = App()
+    app.run()  # This line should be the last one in the main block
+
