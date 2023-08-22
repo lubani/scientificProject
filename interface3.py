@@ -176,7 +176,7 @@ class App:
         self.time_scale = tk.Scale(self.root, from_=0, to=self.t_max, resolution=self.pcm.dt,
                                    orient=tk.HORIZONTAL, command=self.update_time)
         # Position the scale at the top of the frame
-        self.time_scale.grid(row=0, column=0, sticky='n')
+        self.time_scale.grid(row=0, column=0, sticky='nsew')
 
         # Create a variable for the dropdown selection
         self.solution_type = tk.StringVar(self.root)
@@ -185,7 +185,7 @@ class App:
         # Create the dropdown menu
         solution_menu = tk.OptionMenu(self.frame, self.solution_type,
                                       "Implicit", "Numerical", "Analytical")
-        solution_menu.grid(row=0, column=1, sticky='n')  # Position the dropdown menu at the top center
+        solution_menu.grid(row=0, column=1, sticky='nsew')  # Position the dropdown menu at the top center
         # Link the update function to the variable
         self.solution_type.trace('w', self.update_solution_type)
 
@@ -278,7 +278,7 @@ class App:
             self.T_arr_to_display = self.T_arr_implicit
             self.t_arr_final = self.t_arr4
 
-        # Update the 'to' parameter of the time scale widget
+        # Update the 'to' parameter of the timescale widget
         self.time_scale.config(to=self.t_arr_final[-1])
 
         # Call update_plots to update the plots based on the selected solution type
@@ -317,8 +317,8 @@ class App:
     def update_line_plot(self, x, y):
         self.line1.set_data(x, y)
         self.ax1.relim()
-        self.ax1.set_xlim([np.min(x), np.max(x)])
-        self.ax1.set_ylim([np.min(y), np.max(y)])
+        # self.ax1.set_xlim([np.min(x), np.max(x)])
+        # self.ax1.set_ylim([np.min(y), np.max(y)])
         self.ax1.autoscale_view()
         self.canvas1.print_figure("TE.png")
         self.canvas1.draw()

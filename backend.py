@@ -257,7 +257,7 @@ class Regolith(PCM):
         cls.dt = max(min(cls.dt, 0.5 * cls.dx ** 2 * cls.alpha2), 0.001)
         print("dt = ", cls.dt)
         T_arr = np.full((nx, 1), cls.T_a, dtype=np.float64)
-        T_arr[0, :] = self.T_m + 100
+        T_arr[0, :] = 1800
         H_arr = self.initial_enthalpy(x_arr, cls).reshape(-1, 1)  # Initialize enthalpy
         print("initial enthalpy = ", H_arr)
         current_time = cls.dt
@@ -428,7 +428,7 @@ class Iron(PCM):
     def calcTemperature3(self, x_arr, tmax, cls):
         nx = len(x_arr)
         T_arr = np.full((nx, 1), cls.T_a, dtype=np.float64)
-        T_arr[0, :] = cls.T_m + 100  # Initial temperature condition
+        T_arr[0, :] = 1800  # Initial temperature condition
 
         # Parameters
         dx = cls.dx
@@ -448,7 +448,7 @@ class Iron(PCM):
             T_new[1:nx - 1] = T_old[1:nx - 1] + dt * k_dx_squared * (T_old[:-2] - 2 * T_old[1:-1] + T_old[2:])
 
             # Boundaries (modify as needed for Iron)
-            T_new[0] = self.T_m + 100
+            T_new[0] = 1800
             T_new[-1] = cls.T_a
 
             # Add new temperature to array
@@ -460,14 +460,12 @@ class Iron(PCM):
         return T_arr, t_arr
 
     def implicitSol(self, x_arr, tmax, cls):
-        heat_source_value = 1000
-        T_ambient = cls.T_a  # Ambient temperature for Iron
+        heat_source_value = 10
 
         num_segments = len(x_arr)
         t_arr = [self.dt]  # Time array
         # Initialize the temperature array
         T_arr = np.full((num_segments, len(t_arr)), cls.T_a)
-        T_arr[0, :] = cls.T_m + 100  # Initial
         H_arr = np.ones((num_segments, 1)) * cls.calcEnthalpy2(T_arr, cls)  # Initial enthalpy
 
         t = self.dt
@@ -484,18 +482,17 @@ class Iron(PCM):
                 c = cls.calcSpecificHeat(T_old[i])
                 alpha = self.alpha(k, c, cls.rho)
 
-                # Check if alpha is too small
-                if abs(alpha) < 1e-10:
-                    raise ValueError("alpha is too small")
+                lmbda = cls.dt / cls.dx ** 2 * alpha
 
-                lmbda = cls.dt / cls.dx ** 2
+                # Fill the coefficient matrix A and the right-hand side vector b
+                A[i, i - 1] = -lmbda
+                A[i, i] = 1 + 2 * lmbda
+                A[i, i + 1] = -lmbda
+                b[i] = T_old[i]
 
-                # Check if lmbda is too large
-                if abs(lmbda) > 1e10:
-                    raise ValueError("lmbda is too large")
             A[0, 0] = 1
             A[0, 1] = -1
-            b[0] = heat_source_value * cls.dt / cls.dx  # Heat source applied at the left boundary
+            b[0] = heat_source_value * cls.dt / cls.dx ** 2  # Heat source applied at the left boundary
 
             A[-1, -1] = 1
             A[-1, -2] = -1
@@ -519,6 +516,7 @@ class Iron(PCM):
             t_arr.append(t)
 
         return T_arr, np.array(t_arr)
+
     def calcThermalConductivity(self, temp):
         k = 0.95 - 0.64 * 10 ** -3 * temp + 0.67 * 1e-6 * temp ** 2
         # print("k = ", k)
