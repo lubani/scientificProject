@@ -2,13 +2,19 @@ import os
 import tkinter as tk
 import google
 import logging
+from matplotlib.ticker import ScalarFormatter
+from keras.optimizers import Adam
 from matplotlib import pyplot as plt
+from matplotlib.backends._backend_tk import NavigationToolbar2Tk
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from tkinter import ttk
-
+import deepLearning
+from deepLearning import *
+from PIL import Image, ImageTk
 import backend
 from backend import *
+from keras.callbacks import EarlyStopping
 
 np.set_printoptions(precision=8, suppress=True)
 
@@ -142,23 +148,25 @@ class InputWindow1(tk.Tk):
 
 class App:
     def __init__(self):
-        # super().__init__()
         self.choiceWindow = chooseInput()
         self.choiceWindow.wait_window()
-        if self.choiceWindow.v.get() == 0:
+        choice = self.choiceWindow.v.get()
+        print(f"Debug: User choice for input window = {choice}")
+
+        if choice == 0:
             self.input_window = InputWindow0()
             self.input_window.mainloop()
-            self.L, self.t_max, self.k, self.c, self.rho, \
-            self.T_m, self.LH = self.input_window.submit()
+            self.L, self.t_max, self.k, self.c, self.rho, self.T_m, self.LH = self.input_window.submit()
             self.input_window.destroy()
             self.pcm = backend.customPCM(self.k, self.c, self.rho, self.T_m, self.LH)
         else:
             self.input_window = InputWindow1()
-            # Get the input values from the window
             self.input_window.mainloop()
             self.L, self.t_max, self.material = self.input_window.submit()
             self.input_window.destroy()
             self.pcm = globals()[self.material]()
+
+        print(f"Debug: Selected material = {self.material if choice else 'Custom'}")
 
         # Create the main window
         self.root = tk.Tk()
@@ -180,11 +188,11 @@ class App:
 
         # Create a variable for the dropdown selection
         self.solution_type = tk.StringVar(self.root)
-        self.solution_type.set("Implicit")  # default value
+        self.solution_type.set("Analytical")  # default value
 
         # Create the dropdown menu
         solution_menu = tk.OptionMenu(self.frame, self.solution_type,
-                                      "Implicit", "Numerical", "Analytical")
+                                      "Analytical", "Enthalpy Method", "Implicit", "Numerical", "PINN")
         solution_menu.grid(row=0, column=1, sticky='nsew')  # Position the dropdown menu at the top center
         # Link the update function to the variable
         self.solution_type.trace('w', self.update_solution_type)
@@ -251,23 +259,50 @@ class App:
         self.root.grid_columnconfigure(1, weight=1)
         self.root.grid_rowconfigure(2, weight=1)
         self.root.grid_columnconfigure(2, weight=1)
+        self.fig_PINN = plt.Figure(figsize=(15, 5), dpi=100)
+        self.moving_boundary_locations = []
+        self.indices = []
 
         self.calcAll()
 
     def calcAll(self):
-        selected_solution = self.solution_type.get()
-        self.x_arr2 = np.arange(0, self.L + self.pcm.dx, self.pcm.dx)
-        self.t_arr2 = np.arange(self.pcm.dt, self.t_max, self.pcm.dt)
-        # Compute both solutions (only once)
+        self.x_arr2 = self.x_arr5 = np.arange(0, self.L, self.pcm.dx)
+        self.t_arr2 = self.t_arr5 = np.arange(self.pcm.dt, self.t_max, self.pcm.dt)
+
+        print(f"Debug: self.x_arr2 length = {len(self.x_arr2)}, values = {self.x_arr2}")
+        print(f"Debug: self.t_arr2 length = {len(self.t_arr2)}, values = {self.t_arr2}")
 
         self.T_arr_numerical, self.t_arr3 = self.pcm.calcTemperature3(self.x_arr2, self.t_max, self.pcm)
         self.T_arr_analytical = self.pcm.explicitSol(self.x_arr2, self.t_arr2, self.pcm)
-        self.T_arr_implicit, self.t_arr4 = self.pcm.implicitSol(self.x_arr2, self.t_max, self.pcm)
+        self.T_arr_implicit, self.H_arr_final, self.t_arr4 = self.pcm.implicitSol(self.x_arr2, self.t_max, self.pcm)
+        self.T_arr_enth, self.H_arr_enth = self.pcm.solve_stefan_problem_enthalpy(self.pcm, self.L, self.t_max)
+        # self.H_arr_final = self.H_arr_enth
+        print(f"Debug: self.x_arr2 length = {len(self.x_arr2)}, values = {self.x_arr2}")
+        print(f"Debug: self.t_arr2 length = {len(self.t_arr2)}, values = {self.t_arr2}")
+
+        T_m = self.pcm.T_m  # Melting temperature from your PCM class
+        T = self.T_arr_implicit  # Temperature field from your enthalpy solver
+        moving_boundary_indices = self.pcm.calculate_moving_boundary_indices(self.T_arr_implicit, self.pcm.T_m)
+        print("Debug: Moving boundary indices = ", moving_boundary_indices)
+        # Convert indices to actual spatial locations if needed
+        dx = self.pcm.dx  # Your spatial grid spacing from your PCM class
+
+        for i, val in enumerate(moving_boundary_indices):
+            if val is not None:
+                self.moving_boundary_locations.append(val * dx)
+                self.indices.append(i)
+
+        self.moving_boundary_locations = np.array(self.moving_boundary_locations)
+        self.indices = np.array(self.indices)
+
         # Call update_plots to display the selected solution
         self.update_solution_type()
 
     def update_solution_type(self, *args):
         selected_solution = self.solution_type.get()
+
+        print(f"Debug: Selected solution type = {selected_solution}")
+
         if selected_solution == "Analytical":
             self.T_arr_to_display = self.T_arr_analytical
             self.t_arr_final = self.t_arr2
@@ -277,6 +312,34 @@ class App:
         elif selected_solution == "Implicit":
             self.T_arr_to_display = self.T_arr_implicit
             self.t_arr_final = self.t_arr4
+        elif selected_solution == "Enthalpy Method":
+            self.T_arr_to_display = self.T_arr_enth
+            self.t_arr_final = self.t_arr5
+        elif selected_solution == 'PINN':
+
+            # Generate data based on the selected problem type
+            x, y, x_boundary = self.pcm.generate_data(self.L, self.t_max)
+
+            # Calculate boundary indices
+            self.boundary_indices = self.pcm.calculate_boundary_indices(
+                x, self.L, self.pcm.dt, T=self.T_arr_implicit,
+                T_m=self.pcm.T_m, mode='initial')
+            print("Debug: Calculated boundary_indices =", self.boundary_indices)
+
+            # Here x and y are your initial data points
+            initial_data = (x, y)
+
+            # Create CustomPINNModel object
+            model = CustomPINNModel(input_dim=2, output_dim=1, alpha=self.pcm.alpha2,
+                                    T_m=self.pcm.T_m, T_a=self.pcm.T_a, boundary_indices=self.boundary_indices,
+                                    initial_data=initial_data, y=y, x_max=self.L,
+                                    moving_boundary_locations=self.moving_boundary_locations)
+
+            self.loss_values, self.accuracy_values, self.Temperature_pred, self.Boundary_pred = train_PINN(
+                model, x, model.y_T, model.y_B, self.T_arr_implicit, self.pcm, 25)
+
+            # Show the PINN plots in a new Tkinter window
+            self.show_PINN_plots()
 
         # Update the 'to' parameter of the timescale widget
         self.time_scale.config(to=self.t_arr_final[-1])
@@ -292,12 +355,13 @@ class App:
 
         # Update line plot 3 using the selected time index
         self.update_line_plot3(self.x_arr2, self.T_arr_to_display[:, t_idx])
+        # if self.H_arr_final is None:
+        #     self.H_arr_final = self.pcm.calcEnthalpy2(self.T_arr_to_display, self.pcm)
 
-        self.H_arr = self.pcm.calcEnthalpy2(self.T_arr_to_display, self.pcm)
-        print("H values from calcEnthalpy2:", self.H_arr)
+        # print("H values from calcEnthalpy2:", self.H_arr_final)
 
-        self.energy_sufficiency = self.pcm.calcEnergySufficiency(self.H_arr)
-        self.update_line_plot(self.H_arr[:, t_idx], self.T_arr_to_display[:, t_idx])
+        self.energy_sufficiency = self.pcm.calcEnergySufficiency(self.H_arr_final)
+        self.update_line_plot(self.H_arr_final[:, t_idx], self.T_arr_to_display[:, t_idx])
         self.update_surface_plot(self.x_arr2, self.t_arr_final, self.T_arr_to_display)
         self.canvas1.draw()
         self.canvas2.draw()
@@ -313,6 +377,110 @@ class App:
         # self.v.grid(row=1, column=2, sticky='ns')
         # self.root.wait_window()
         # self.run()
+
+    def show_PINN_plots(self):
+        # Create a new Tkinter window
+        new_window = tk.Toplevel(self.root)
+        new_window.title("PINN Plots")
+
+        # Create a main frame
+        main_frame = tk.Frame(new_window)
+        main_frame.grid(row=0, column=0)
+
+        # Create a frame for the canvas
+        canvas_frame = tk.Frame(main_frame)
+        canvas_frame.grid(row=0, column=0)
+
+        # Create a frame for the toolbar
+        toolbar_frame = tk.Frame(main_frame)
+        toolbar_frame.grid(row=1, column=0)
+
+        # Create a canvas
+        canvas = FigureCanvasTkAgg(self.fig_PINN, master=canvas_frame)
+        canvas.get_tk_widget().grid(row=0, column=0)
+
+        # Add a toolbar
+        toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
+        toolbar.update()
+        toolbar.pack()
+
+        # Create subplots
+        ax1 = self.fig_PINN.add_subplot(151)
+        ax2 = self.fig_PINN.add_subplot(152)
+        ax2a = self.fig_PINN.add_subplot(153)
+        ax3 = self.fig_PINN.add_subplot(154, projection='3d')
+        ax4 = self.fig_PINN.add_subplot(155)
+
+        # Plot loss and accuracy for T
+        ax1.plot(self.loss_values)
+        ax1.set_title('Loss during Training')
+        ax1.set_xlabel('Epoch')
+        ax1.set_ylabel('Loss')
+
+        accuracy_T_values = self.accuracy_values['accuracy_T']
+
+        ax2.plot(accuracy_T_values)
+        ax2.set_title('Accuracy T during Training')
+        ax2.set_xlabel('Epoch')
+        ax2.set_ylabel('Accuracy')
+
+        # New: Plot accuracy for B
+        accuracy_B_values = self.accuracy_values['accuracy_B']
+
+        ax2a.plot(accuracy_B_values)
+        ax2a.set_title('Accuracy B during Training')
+        ax2a.set_xlabel('Epoch')
+        ax2a.set_ylabel('Accuracy')
+
+        # Compute expected and actual sizes
+        x_dim = len(self.x_arr2)
+        t_dim = len(self.t_arr2)
+        expected_size = x_dim * t_dim
+        actual_size = self.Temperature_pred.shape[0]  # Change this to the actual temperature predictions
+
+        # Compute the minimum size to consider and the new time dimension based on this size
+        min_size = min(expected_size, actual_size)
+        new_t_dim = min_size // x_dim  # Integer division to get the floor value
+
+        # Slice and reshape Temperature_pred just once based on new_t_dim and x_dim
+        self.Temperature_pred_sliced = self.Temperature_pred[:min_size, :]
+        self.Temperature_pred_reshaped = self.Temperature_pred_sliced.reshape((x_dim, new_t_dim))
+        print(f"Debug: Shape of self.t_arr2: {self.t_arr2.shape}")
+        print(f"Debug: Shape of self.Boundary_pred: {self.Boundary_pred.shape}")
+
+        self.Boundary_pred_reshaped = np.reshape(self.Boundary_pred, -1)[:len(self.t_arr2)]
+        print(f"Debug: Reshaped self.Boundary_pred: {self.Boundary_pred_reshaped.shape}")
+
+        # Find the minimum and maximum values in Temperature_pred_reshaped
+        z_min = np.min(self.Temperature_pred_reshaped)
+        z_max = np.max(self.Temperature_pred_reshaped)
+
+        # Set the z-axis limits
+        # ax3.set_zlim(z_min, z_max)
+        # Change z-axis label formatting to decimal
+        ax3.zaxis.set_major_formatter(ScalarFormatter(useMathText=False, useOffset=False))
+
+        X, T = np.meshgrid(self.x_arr2, self.t_arr2)
+        ax3.plot_surface(X, T, np.transpose(self.Temperature_pred_reshaped), cmap='coolwarm')
+        ax3.set_title('Temperature Distribution (PINN)')
+        ax3.set_xlabel('x')
+        ax3.set_ylabel('t')
+        ax3.set_zlabel('Temperature')
+
+        # Plotting the predicted boundary
+        ax4.plot(self.t_arr2, self.Boundary_pred_reshaped, label='Predicted Boundary')
+        print("Debug: our indices:", self.indices)
+        print("Debug: moving_boundary_locations:", self.moving_boundary_locations)
+        # Plotting the true boundary
+        true_boundary_times = np.array(self.indices) * self.pcm.dt  # assuming self.dt is your time step
+        ax4.plot(true_boundary_times, self.moving_boundary_locations, label='True Boundary', linestyle='--')
+
+        ax4.set_title('Boundary Location (PINN)')
+        ax4.set_xlabel('t')
+        ax4.set_ylabel('Boundary Location')
+        ax4.legend()
+
+        canvas.draw()
 
     def update_line_plot(self, x, y):
         self.line1.set_data(x, y)
@@ -334,7 +502,7 @@ class App:
         t_idx = int(self.time_scale.get())
         self.t_idx = t_idx if t_idx < self.T_arr_to_display.shape[1] else self.T_arr_to_display.shape[1] - 1
 
-        self.line1.set_ydata(self.H_arr[:, self.t_idx])
+        self.line1.set_ydata(self.H_arr_final[:, self.t_idx])
         self.ax1.relim()
         self.ax1.autoscale_view()
         self.canvas1.draw()
@@ -355,10 +523,10 @@ class App:
         self.root.mainloop()
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO)
-    if int(os.environ.get("PRODUCTION", 0)) == 1:
-        logging_client = google.cloud.logging.Client()
-        logging_client.setup_logging()
+    # logging.basicConfig(level=logging.INFO)
+    # if int(os.environ.get("PRODUCTION", 0)) == 1:
+    #     logging_client = google.cloud.logging.Client()
+    #     logging_client.setup_logging()
     app = App()
     app.run()  # This line should be the last one in the main block
 
