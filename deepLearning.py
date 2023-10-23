@@ -9,12 +9,15 @@ from keras.optimizers import Adam
 from sklearn.preprocessing import MinMaxScaler
 from tqdm import tqdm
 
+
 # Removed unused imports and grouped similar imports together
 
 def scaled_sigmoid(T_a, T_m, offset=500):
     def activation(x):
         return T_a + (T_m + offset - T_a) * tf.nn.sigmoid(x)
+
     return activation
+
 
 def custom_accuracy(y_true, y_pred):
     return 1.0 - tf.reduce_mean(tf.abs((y_true - y_pred) / (y_true + 1e-8)))
@@ -125,35 +128,53 @@ class CustomPINNModel(Model):
     def call(self, inputs, training=False, **kwargs):
         original_x = tf.identity(inputs)
         x = inputs
-        for dense, batch_norm in zip(self.dense_layers, self.batch_norm_layers):
+        for dense in self.dense_layers:
             x = dense(x)
-            x = batch_norm(x, training=training)
-        self.is_boundary = self.is_boundary_func(original_x)
 
-        # Temperature subnetwork
-        temp_x = x
+        is_boundary = self.is_boundary_func(original_x)
+
+        # Temperature Subnetwork
+        x_T = x
         for layer in self.temperature_subnetwork:
-            temp_x = layer(temp_x)
-        temp_output = self.output_layer_temperature(temp_x)
+            x_T = layer(x_T)
+        output_T = self.output_layer_temperature(x_T)
 
-        # Boundary subnetwork
-        boundary_x = x
+        # Boundary Subnetwork
+        x_B = x
         for layer in self.boundary_subnetwork:
-            boundary_x = layer(boundary_x)
-        bound_output = self.output_layer_boundary(boundary_x)
+            x_B = layer(x_B)
+        output_B = self.output_layer_boundary(x_B)
 
-        self.final_output = tf.where(self.is_boundary, bound_output, temp_output)
-
-        # Debugging print statements
-        print("Input shape:", inputs.shape)
-        print("Shape after shared network:", x.shape)
-        print("is_boundary shape:", self.is_boundary.shape)
-        print("Temperature output shape:", temp_output.shape)
-        print("Boundary output shape:", bound_output.shape)
-
-        return {'temperature': temp_output, 'boundary': bound_output}
+        return {'temperature': output_T, 'boundary': output_B, 'is_boundary': is_boundary}
 
     # Helper function to update min and max variables
+
+    def compute_loss(self, y_true, y_pred):
+        y_pred_T = y_pred['temperature']
+        y_pred_B = y_pred['boundary']
+        is_boundary = y_pred['is_boundary']
+
+        y_true_T, y_true_B = tf.split(y_true, num_or_size_splits=[1, 1], axis=1)
+
+        # MSE loss computation
+        mse_loss = tf.reduce_mean(tf.square(y_true_T - y_pred_T))
+
+        # Physics loss computation
+        with tf.GradientTape(persistent=True) as tape:
+            tape.watch(self.input)
+            y_pred_T = self(self.input, training=True)['temperature']
+        dy_dx = tape.gradient(y_pred_T, self.input)
+        del tape
+        dT_dx = dy_dx[:, 0:1]
+        dT_dt = dy_dx[:, 1:2]
+        residual = dT_dt - self.alpha2 * dT_dx
+        physics_loss = tf.reduce_mean(tf.square(residual))
+
+        # Boundary loss computation
+        boundary_loss = 0  # Your boundary loss logic here
+
+        return mse_loss, physics_loss, boundary_loss
+
     def update_min_max(self, attr_name, value):
         min_attr = f"min_{attr_name}"
         max_attr = f"max_{attr_name}"
@@ -177,26 +198,27 @@ class CustomPINNModel(Model):
             total_loss = mse_loss + self.lambda_1 * physics_loss + self.lambda_2 * boundary_loss
 
         grads = tape.gradient(total_loss, self.trainable_variables)
-
-        # Debug: Print gradient statistics for diagnosis
-        for i, grad in enumerate(grads):
-            print(f"Gradient layer {i}: min = {tf.reduce_min(grad)}, max = {tf.reduce_max(grad)}")
-
-        # Clip gradients using global norm
-        grads, _ = tf.clip_by_global_norm(grads, 1.0)
-
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
 
-        accuracy_t = self.accuracy_metric_t(y[:, 0:1], y_pred[:, 0:1])
-        accuracy_b = self.accuracy_metric_b(y[:, 1:2], y_pred[:, 1:2])
+        # Calculate scaled accuracy and loss here
+        scaled_accuracy_T = custom_accuracy(y[:, 0:1], y_pred['temperature'])
+        scaled_accuracy_B = custom_accuracy(y[:, 1:2], y_pred['boundary'])
+
+        # Update min and max for scaling
+        self.update_min_max('total_loss', total_loss)
+        self.update_min_max('total_accuracy_T', scaled_accuracy_T)
+        self.update_min_max('total_accuracy_B', scaled_accuracy_B)
+
+        # Print or store the scaled metrics for real-time monitoring
+        print(f"Scaled Accuracy T: {scaled_accuracy_T}, Scaled Accuracy B: {scaled_accuracy_B}")
 
         return {
             "loss": total_loss,
             "mse_loss": mse_loss,
             "physics_loss": physics_loss,
             "boundary_loss": boundary_loss,
-            "accuracy_T": accuracy_t,
-            "accuracy_B": accuracy_b
+            "scaled_accuracy_T": scaled_accuracy_T,
+            "scaled_accuracy_B": scaled_accuracy_B
         }
 
     def branching_function(self, inputs):
@@ -270,21 +292,45 @@ def create_PINN_model(input_dim, output_dim):
     return model
 
 
-def stefan_loss(model, x, y, pcm):
+def stefan_loss(model, x, y_T, y_B, T_arr_implicit, pcm):
     x = tf.convert_to_tensor(x, dtype=tf.float32)
-    y = tf.convert_to_tensor(y, dtype=tf.float32)
+    y_T = tf.convert_to_tensor(y_T, dtype=tf.float32)
+    y_B = tf.convert_to_tensor(y_B, dtype=tf.float32)
+    T_arr_implicit = tf.convert_to_tensor(T_arr_implicit, dtype=tf.float32)
+
     with tf.GradientTape(persistent=True) as tape:
         tape.watch(x)
         model_output = model(x)
-        y_pred = model_output['temperature']
-        boundary_pred = model_output['boundary']
-        mse_loss = tf.reduce_mean(tf.square(y - y_pred))
-    dy_dx = tape.gradient(y_pred, x)
+        y_pred_T = model_output['temperature']
+        y_pred_B = model_output['boundary']
+
+        # Temperature MSE Loss
+        mse_loss_T = tf.reduce_mean(tf.square(y_T - y_pred_T))
+
+        # Boundary MSE Loss
+        mse_loss_B = tf.reduce_mean(tf.square(y_B - y_pred_B))
+
+    dy_dx = tape.gradient(y_pred_T, x)
     del tape
 
     dT_dx = dy_dx[:, 0:1]
     dT_dt = dy_dx[:, 1:2]
-    residual = dT_dt - pcm.alpha2 * dT_dx
+    # Get the shape of dT_dt
+    dT_dt_shape = tf.shape(dT_dt)
+
+    # Calculate the total number of elements for reshaping
+    total_elements = tf.reduce_prod(dT_dt_shape)
+
+    # Explicitly trim T_arr_implicit to match the shape of dT_dt
+    T_arr_implicit_flattened = tf.reshape(T_arr_implicit, [-1])  # Flatten the array
+    T_arr_implicit_trimmed = T_arr_implicit_flattened[:total_elements]  # Trim the array
+
+    # Reshape T_arr_implicit to match the dynamic shape
+    T_arr_implicit_reshaped = tf.reshape(T_arr_implicit_trimmed, [total_elements, 1])
+
+    # Then proceed with the residual calculation
+    residual = dT_dt - pcm.alpha2 * dT_dx - T_arr_implicit_reshaped
+
     physics_loss = tf.reduce_mean(tf.square(residual))
 
     ds_dt = None
@@ -298,10 +344,11 @@ def stefan_loss(model, x, y, pcm):
     boundary_residual = pcm.LH - pcm.k * ds_dt - pcm.alpha2 * dT_dx
     boundary_loss = tf.reduce_mean(tf.square(boundary_residual))
 
-    total_loss = mse_loss + 1e-4 * physics_loss + 1e-3 * boundary_loss
+    # Updated total loss
+    total_loss = mse_loss_T + mse_loss_B + 1e-4 * physics_loss + 1e-3 * boundary_loss
 
-    # Debugging print statements
-    print("mse_loss:", mse_loss)
+    print("mse_loss_T:", mse_loss_T)
+    print("mse_loss_B:", mse_loss_B)
     print("physics_loss:", physics_loss)
     print("boundary_loss:", boundary_loss)
     print("total_loss:", total_loss)
@@ -443,6 +490,7 @@ def get_combined_custom_loss(model, alpha, boundary_indices, T_m, T_a, L, k, out
         is_boundary = model.branching_layer(x_input)
         return combined_custom_loss(y_true, y_pred, x_input, model, alpha, boundary_indices, T_m, T_a, L, k,
                                     output_type, mask_array=mask_array)
+
     return loss_func
 
 
@@ -455,6 +503,7 @@ def train_PINN(model, x, y_T, y_B, T_arr_implicit, pcm, epochs=25):
     x = tf.convert_to_tensor(x, dtype=tf.float32)
     y_T = tf.convert_to_tensor(y_T, dtype=tf.float32)
     y_B = tf.convert_to_tensor(y_B, dtype=tf.float32)
+    T_arr_implicit = tf.convert_to_tensor(T_arr_implicit, dtype=tf.float32)
 
     for epoch in range(epochs):
         with tf.GradientTape(persistent=True) as tape:
@@ -462,13 +511,12 @@ def train_PINN(model, x, y_T, y_B, T_arr_implicit, pcm, epochs=25):
             model_output = model(x)
             y_pred_T = model_output['temperature']
             y_pred_B = model_output['boundary']
-            loss_value = stefan_loss(model, x, y_T, pcm)
+            loss_value = stefan_loss(model, x, y_T, y_B, T_arr_implicit, pcm)
 
         grads = tape.gradient(loss_value, model.trainable_variables)
-
         grads, _ = tf.clip_by_global_norm(grads, 1.0)
-        # Monitor gradients
-        if epoch % 5 == 0:  # Change the frequency as per your requirement
+
+        if epoch % 5 == 0:
             print(f"Epoch {epoch}: Monitoring gradients")
             for i, grad in enumerate(grads):
                 if grad is not None:
