@@ -1,18 +1,18 @@
 import numpy as np
 import tensorflow as tf
 from keras.regularizers import l2
-from keras.src.layers import LeakyReLU
+from keras.src.layers import LeakyReLU, Dense, Dropout, BatchNormalization, ReLU
 from matplotlib import pyplot as plt
 from keras import Model
 from keras.losses import Loss
 from keras.optimizers import Adam
 from sklearn.preprocessing import MinMaxScaler
 from tqdm import tqdm
-
+from keras.optimizers.schedules import ExponentialDecay
 
 # Removed unused imports and grouped similar imports together
 
-def scaled_sigmoid(T_a, T_m, offset=500):
+def scaled_sigmoid(T_a, T_m, offset=256):
     def activation(x):
         return T_a + (T_m + offset - T_a) * tf.nn.sigmoid(x)
 
@@ -28,6 +28,7 @@ class CustomPINNModel(Model):
                  moving_boundary_locations=None, x_max=1.0, **kwargs):
         super(CustomPINNModel, self).__init__(**kwargs)
 
+        # Initialize class attributes (keeping your original attributes)
         self.ema_accuracy_T, self.ema_accuracy_B = None, None
         self.min_total_loss = tf.Variable(float('inf'), trainable=False, dtype=tf.float32)
         self.max_total_loss = tf.Variable(float('-inf'), trainable=False, dtype=tf.float32)
@@ -36,47 +37,38 @@ class CustomPINNModel(Model):
         self.min_total_accuracy_B = tf.Variable(float('inf'), trainable=False, dtype=tf.float32)
         self.max_total_accuracy_B = tf.Variable(float('-inf'), trainable=False, dtype=tf.float32)
 
-        self.optimizer = tf.keras.optimizers.Adam(learning_rate=0.00001)  # Define optimizer as a class attribute
+        lr_schedule = ExponentialDecay(initial_learning_rate=1e-2, decay_steps=10000, decay_rate=0.9)
+        self.optimizer = Adam(learning_rate=0.0001)
+        self.x_max = x_max
+        reg_lambda = 0.01
 
-        self.x_max = x_max  # Initialize x_max
-        reg_lambda = 0.0001  # You can tune this value
-        self.temperature_subnetwork = [
-            tf.keras.layers.Dense(128, activation=LeakyReLU(alpha=0.1), kernel_regularizer=l2(reg_lambda),
-                                  name='temp_dense_{}'.format(i))
-            for i in range(3)
-        ]
-        self.temperature_subnetwork.append(tf.keras.layers.Dropout(0.2))
+        # Temperature Subnetwork with ReLU activation
+        self.temperature_subnetwork = [Dense(128, activation=ReLU(), kernel_regularizer=l2(reg_lambda)) for i in
+                                       range(3)]
+        self.temperature_subnetwork.append(Dropout(0.3))
 
-        self.boundary_subnetwork = [
-            tf.keras.layers.Dense(64, activation=LeakyReLU(alpha=0.1), kernel_regularizer=l2(reg_lambda),
-                                  name='boundary_dense_{}'.format(i))
-            for i in range(2)
-        ]
-        self.boundary_subnetwork.append(tf.keras.layers.Dropout(0.2))
+        # Boundary Subnetwork with Swish activation
+        self.boundary_subnetwork = [Dense(64, activation='swish', kernel_regularizer=l2(reg_lambda)) for i in range(2)]
+        self.boundary_subnetwork.append(Dropout(0.3))
 
-        self.dense_layers = [
-            tf.keras.layers.Dense(256, activation=LeakyReLU(alpha=0.1), kernel_regularizer=l2(reg_lambda),
-                                  name='shared_dense_1'),
-            tf.keras.layers.Dropout(0.2, name='shared_dropout_1'),
-            tf.keras.layers.Dense(256, activation=LeakyReLU(alpha=0.1), kernel_regularizer=l2(reg_lambda),
-                                  name='shared_dense_2'),
-            tf.keras.layers.Dropout(0.2, name='shared_dropout_2'),
-            tf.keras.layers.Dense(256, activation=LeakyReLU(alpha=0.1), kernel_regularizer=l2(reg_lambda),
-                                  name='shared_dense_3')
-        ]
-        self.batch_norm_layers = [
-            tf.keras.layers.BatchNormalization(name='batch_norm_{}'.format(i)) for i in range(5)
-        ]
-        self.output_layer_temperature = tf.keras.layers.Dense(output_dim, activation=scaled_sigmoid(T_a, T_m),
-                                                              name='output_layer_temperature')
-        self.output_layer_boundary = tf.keras.layers.Dense(1, activation=tf.keras.layers.LeakyReLU(alpha=0.3),
-                                                           name='output_layer_boundary')
+        # Batch Normalization Layers
+        self.batch_norm_layers = [BatchNormalization() for i in range(5)]
 
+        # Shared Layers with Swish activation
+        self.dense_layers = [Dense(256, activation='swish', kernel_regularizer=l2(reg_lambda)) for i in range(3)]
+        self.dense_layers.append(Dropout(0.3))
+
+
+        # Output Layers
+        self.output_layer_temperature = Dense(output_dim, activation=scaled_sigmoid(T_a, T_m))
+        self.output_layer_boundary = Dense(1, activation='softplus')  # Using linear to allow for flexibility
+
+        # Additional attributes for normalization and tracking
         self.alpha = alpha
         self.T_m = T_m
         self.T_a = T_a
         self.boundary_indices = boundary_indices
-        print("Debug: boundary_indices = ", self.boundary_indices)
+
         if initial_data is not None:
             x_initial, _ = initial_data
             self.x_mean = np.mean(x_initial, axis=0)
@@ -84,6 +76,7 @@ class CustomPINNModel(Model):
         else:
             self.x_mean = 0.0
             self.x_std = 1.0
+
         # Initialize attributes for Z-score normalization of the total loss
         self.sum_total_loss = tf.Variable(0.0, trainable=False, dtype=tf.float32)
         self.sum_squared_total_loss = tf.Variable(0.0, trainable=False, dtype=tf.float32)
@@ -91,19 +84,12 @@ class CustomPINNModel(Model):
         self.ema_loss = None
 
         if y is not None and moving_boundary_locations is not None:
-            # Compute y_T and y_B based on boundary_indices and moving_boundary_locations
             self.y_T = y
-
             if boundary_indices is not None and 'condition1' in boundary_indices and 'condition2' in boundary_indices:
-                # Choose the appropriate condition based on your specific requirements
                 self.y_B_condition1 = y[np.array(boundary_indices['condition1'])]
                 self.y_B_condition2 = y[np.array(boundary_indices['condition2'])]
-
-                # You might want to combine both conditions in some way or use them separately
                 self.y_B = np.concatenate([self.y_B_condition1, self.y_B_condition2])
-
             else:
-                print("Debug: boundary_indices is either None or does not contain the expected keys.")
                 self.y_B = np.array([])
 
             self.y_T_mean = np.mean(self.y_T)
@@ -198,7 +184,10 @@ class CustomPINNModel(Model):
             total_loss = mse_loss + self.lambda_1 * physics_loss + self.lambda_2 * boundary_loss
 
         grads = tape.gradient(total_loss, self.trainable_variables)
-        self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
+        # Gradient Clipping
+        clipped_grads = [tf.clip_by_value(grad, -10.0, 10.0) for grad in grads]
+
+        self.optimizer.apply_gradients(zip(clipped_grads, self.trainable_variables))
 
         # Calculate scaled accuracy and loss here
         scaled_accuracy_T = custom_accuracy(y[:, 0:1], y_pred['temperature'])
@@ -494,7 +483,7 @@ def get_combined_custom_loss(model, alpha, boundary_indices, T_m, T_a, L, k, out
     return loss_func
 
 
-def train_PINN(model, x, y_T, y_B, T_arr_implicit, pcm, epochs=25):
+def train_PINN(model, x, y_T, y_B, T_arr_implicit, pcm, epochs=25, clip_value=2.0):
     optimizer = model.optimizer
     raw_loss_values = []
     raw_accuracy_values_T = []
@@ -514,7 +503,7 @@ def train_PINN(model, x, y_T, y_B, T_arr_implicit, pcm, epochs=25):
             loss_value = stefan_loss(model, x, y_T, y_B, T_arr_implicit, pcm)
 
         grads = tape.gradient(loss_value, model.trainable_variables)
-        grads, _ = tf.clip_by_global_norm(grads, 1.0)
+        grads, _ = tf.clip_by_global_norm(grads, clip_value)  # Use clip_value here
 
         if epoch % 5 == 0:
             print(f"Epoch {epoch}: Monitoring gradients")
