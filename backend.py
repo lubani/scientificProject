@@ -1,29 +1,43 @@
 import math
 from abc import ABC, abstractmethod
 import numpy as np
+from keras.src.backend import flatten
 from scipy.linalg import lu_factor, lu_solve
 from scipy.special import erf
 
 
 
-def compute_mask_arrays(T, cls, tolerance=50):
-    # T is the temperature array with shape (nx, nt)
-    # cls includes properties like T_m for melting temperature
-    # tolerance defines the range around T_m considered as the mushy zone
+def compute_mask_arrays(T, cls, tolerance=50, phase_mask=None, boundary_mask=None):
+    if phase_mask is None:
+        phase_mask = np.zeros_like(T, dtype=int)
+    phase_mask[:] = 0
+    phase_mask[T < cls.T_m - tolerance] = 0
+    phase_mask[(T >= cls.T_m - tolerance) & (T <= cls.T_m + tolerance)] = 1
+    phase_mask[T > cls.T_m + tolerance] = 2
 
-    nx, nt = T.shape
-    mask_temp = np.zeros_like(T, dtype=int)  # 0 for solid, 1 for mushy, 2 for liquid
-    mask_boundary = np.zeros_like(T, dtype=int)  # Custom logic for boundary conditions
+    if boundary_mask is None:
+        boundary_mask = np.zeros_like(T, dtype=int)
+    boundary_mask[:] = 0
+    boundary_mask[phase_mask == 1] = 1
 
-    # Define masks based on temperature relative to T_m
-    mask_temp[T < cls.T_m - tolerance] = 0  # Solid
-    mask_temp[(T >= cls.T_m - tolerance) & (T <= cls.T_m + tolerance)] = 1  # Mushy
-    mask_temp[T > cls.T_m + tolerance] = 2  # Liquid
+    return phase_mask, boundary_mask
 
-    # Example boundary condition: at x=0 (left boundary), set to 1 across all time steps
-    mask_boundary[0, :] = 1
 
-    return mask_temp, mask_boundary
+# def compute_mask_arrays(T, cls, tolerance=50, phase_mask=None, boundary_mask=None):
+#     if phase_mask is None:
+#         phase_mask = np.zeros_like(T, dtype=int)
+#     phase_mask[:] = 0
+#     phase_mask[T < cls.T_m - tolerance] = 0
+#     phase_mask[(T >= cls.T_m - tolerance) & (T <= cls.T_m + tolerance)] = 1
+#     phase_mask[T > cls.T_m + tolerance] = 2
+#
+#     if boundary_mask is None:
+#         boundary_mask = np.zeros_like(T, dtype=int)
+#     boundary_mask[:] = 0
+#     boundary_mask[phase_mask == 1] = 1
+#
+#     return phase_mask, boundary_mask
+
 
 
 class PCM(ABC):
@@ -49,76 +63,80 @@ class PCM(ABC):
     def solve_stefan_problem_enthalpy(self, cls, L, t_max, phase_mask_array=None, boundary_mask_array=None):
         # Initial setup
         x_arr = np.arange(0, L, cls.dx)
-        t_arr = np.arange(cls.dt, t_max, cls.dt)  # Adjust to include t_max
-        T, H = self.initialize_enthalpy_temperature_arrays(x_arr, cls, t_arr)
+        t_arr = np.arange(cls.dt, t_max, cls.dt)
+        T, H = self.initialize_enthalpy_temperature_arrays(x_arr, cls, len(t_arr))
 
+        # Ensure mask arrays are 1D and match the spatial domain size
         if phase_mask_array is None or boundary_mask_array is None:
-            phase_mask_array, boundary_mask_array = compute_mask_arrays(T, cls)
+            phase_mask_array, boundary_mask_array = compute_mask_arrays(T[:, 0], cls)
+
+        heat_source_max = 1000  # Further increased heat source value
+        cycle_duration = t_max / 2  # Assuming the heat source is active for half the duration
 
         for n in range(len(t_arr) - 1):
             # Dynamically calculate time step size for stability
-            max_k = np.max(self.calcThermalConductivity(T[:, n]))
+            k_values = [self.calcThermalConductivity(temp) for temp in T[:, n]]
+            max_k = np.max(k_values)
             dt_current = self.calculate_dt(cls, max_k)
-            gamma = self.update_gamma(cls, T[:, n], dt_current)  # Adjust gamma calculation for dynamic dt
+            gamma = self.update_gamma(cls, T[:, n], dt_current)
 
-            # Update enthalpy and temperature
+            # Update enthalpy and temperature with a heat source term
             H[:, n + 1], T[:, n + 1] = self.update_enthalpy_temperature(H[:, n], cls, gamma, x_arr)
 
-            # Reapply boundary conditions if necessary
-            T[0, n + 1] = cls.T_m  # Example: Fixed temperature at the boundary x=0
+            # Apply heat source to the left boundary
+            heat_source = self.heat_source_function(t_arr[n], cycle_duration, heat_source_max)
+            H[0, n + 1] += heat_source * dt_current
+
+            # Reapply boundary conditions if necessary, considering the 1D boundary mask
+            if boundary_mask_array is not None:
+                boundary_indices = np.where(boundary_mask_array == 1)[0]
+                T[boundary_indices, n + 1] = cls.T_m
 
             # Update phase mask based on new temperature profile
-            phase_mask_array[:, n + 1] = self.update_phase_mask(T[:, n + 1], cls)
+            if phase_mask_array is not None:
+                phase_mask_array, boundary_mask_array = compute_mask_arrays(T[:, n + 1], cls)
 
         return T, H, phase_mask_array, boundary_mask_array
 
     def update_gamma(self, cls, temp, dt_current):
-        k_max = np.max(cls.calcThermalConductivity(temp))
+        k_max = np.max([cls.calcThermalConductivity(t) for t in temp])
         c_max = np.max(cls.calcSpecificHeat(temp))
         alpha_max = k_max / (cls.rho * c_max)
         gamma = alpha_max * dt_current / cls.dx ** 2
         return gamma
-    def initialize_enthalpy_temperature_arrays(self, x_arr, cls, t_arr):
-        T = np.ones((len(x_arr), len(t_arr))) * cls.T_a
-        H = self.initial_enthalpy(x_arr, cls, len(t_arr))
-        T[0, :] = cls.T_m  # Boundary condition
+
+    def initialize_enthalpy_temperature_arrays(self, x_arr, cls, t_steps):
+        T = np.ones((len(x_arr), t_steps)) * cls.T_a
+        H = self.initial_enthalpy(x_arr, cls, t_steps)
+        T[0, :] = cls.T_m + 10  # Boundary condition, set to slightly above melting temperature for the first column
         return T, H
 
     def calculate_dt(self, cls, max_k, safety_factor=0.4):
-        # Calculate maximum alpha based on maximum thermal conductivity
         max_alpha = max_k / (cls.rho * max(cls.c_solid, cls.c_liquid))
-
-        # Calculate dt based on the CFL condition for stability, incorporating a safety factor
-        max_dt = (safety_factor * cls.dx ** 2) / (max_alpha * 2)  # Factor of 2 for 1D heat equation stability
-
-        # Ensure that max_dt is positive and does not exceed the original dt
+        max_dt = (safety_factor * cls.dx ** 2) / (max_alpha * 2)
         if max_dt <= 0:
             raise ValueError("Non-positive max_dt calculated, check input parameters.")
         return min(max_dt, cls.dt)
 
     def update_enthalpy_temperature(self, H_current, cls, gamma, x_arr):
-        # Explicitly handle boundary conditions for the enthalpy update
         dH = gamma * (np.roll(H_current, -1) - 2 * H_current + np.roll(H_current, 1))
         H_next = H_current + dH
-
-        # Apply Neumann boundary condition at the end (insulated end)
-        H_next[-1] = H_next[-2]  # Assuming the end is insulated
-
+        H_next[0] = H_current[0]  # Reapply left boundary condition
+        H_next[-1] = H_current[-1]  # Reapply right boundary condition
         T_next = self.update_temperature(H_next, cls)
         return H_next, T_next
 
     def update_temperature(self, enthalpy, cls):
-        # Vectorized condition checks
-        temp = np.where(enthalpy <= 0,
-                        cls.T_a + (enthalpy / (cls.rho * cls.c_solid)),
-                        np.where(enthalpy <= cls.LH,
-                                 cls.T_m,
-                                 cls.T_m + ((enthalpy - cls.LH) / (cls.rho * cls.c_liquid))))
+        temp = np.where(
+            enthalpy < cls.LH,
+            cls.T_a + (enthalpy / (cls.rho * cls.c_solid)),
+            cls.T_m + ((enthalpy - cls.LH) / (cls.rho * cls.c_liquid))
+        )
         return temp
 
     def update_phase_mask(self, temperature_array, cls):
         # Adjust tolerance for phase transition detection
-        tolerance = 50  # Example: Adjusted to a smaller value
+        tolerance = 50
         return np.select(
             [temperature_array < cls.T_m - tolerance, temperature_array > cls.T_m + tolerance],
             [0, 1],  # 0 for solid, 1 for liquid
@@ -164,7 +182,6 @@ class PCM(ABC):
                 moving_boundary_indices[n] = phase_change_indices[0]
         return moving_boundary_indices
 
-
     def heat_source_function(self, t, cycle_duration, heat_source_max):
         half_cycle = cycle_duration / 2
         if 0 <= t % cycle_duration < half_cycle:
@@ -187,28 +204,17 @@ class PCM(ABC):
         return T
 
     def initial_enthalpy(self, x_arr, cls, t_steps):
-        # Initialize the enthalpy array with zeros for both space and time dimensions
         H_arr = np.zeros((len(x_arr), t_steps), dtype=np.float64)
-
-        # Loop over the spatial domain to set initial enthalpy based on the initial temperature
         for i, x in enumerate(x_arr):
-            T_initial = cls.T_a if i != 0 else cls.T_m + 100  # Adjust as necessary
-
-            # Calculate the enthalpy for the first time step based on the initial temperature
+            T_initial = cls.T_a if i != 0 else cls.T_m + 10  # Initial temperature condition
             if T_initial < cls.T_m:
-                initial_H = cls.c * (T_initial - cls.T_a)
+                initial_H = cls.rho * cls.c_solid * (T_initial - cls.T_a)
             elif T_initial == cls.T_m:
                 initial_H = cls.LH
             else:
-                initial_H = cls.LH + cls.c * (T_initial - cls.T_m)
-
-            # Set the initial enthalpy for all time steps to the value calculated from the initial temperature
+                initial_H = cls.LH + cls.rho * cls.c_liquid * (T_initial - cls.T_m)
             H_arr[i, :] = initial_H
-
         return H_arr
-
-    def initial_temperature(self, x_arr, cls):
-        return np.full_like(x_arr, cls.T_m)
 
 
     def calcEnthalpy2(self, T, cls):
@@ -216,14 +222,11 @@ class PCM(ABC):
             T < cls.T_m,
             T > cls.T_m
         ]
-
         choices = [
             cls.rho * cls.c * (T - cls.T_a),
             cls.LH + cls.rho * cls.c * (T - cls.T_m)
         ]
-
         H = np.select(conditions, choices, default=cls.LH)
-
         return H
 
     def calcEnthalpy(self, x_arr, t_max, cls):
@@ -292,10 +295,6 @@ class PCM(ABC):
         # Directly applying boundary condition at the first spatial point for all time steps
         T[0, :] = T_final
 
-        # Compute the mask arrays if not provided
-        if bound_mask_array is None:
-            phase_mask_array, bound_mask_array = compute_mask_arrays(T, cls)
-
         for t_idx, t_val in enumerate(t_arr):
             # Ensure t_val is not zero to avoid division by zero
             if t_val > 0:
@@ -307,11 +306,11 @@ class PCM(ABC):
                 # Handle the case where t_val is 0 (initial condition)
                 T[:, t_idx] = T_initial
 
-            # Apply boundary conditions
-            T[:, t_idx] *= (1 - bound_mask_array[:, t_idx])
+            # Compute or update the mask arrays at each time step to reflect current conditions
+            if phase_mask_array is None or bound_mask_array is None:
+                phase_mask_array, bound_mask_array = compute_mask_arrays(T[:, t_idx], cls, tolerance=100)
 
-            # Update the phase mask array based on the temperature
-            phase_mask_array[:, t_idx] = np.where(T[:, t_idx] < cls.T_m, 0, np.where(T[:, t_idx] > cls.T_m, 1, 2))
+            # Optionally, apply additional logic here using the updated masks
 
         return T, phase_mask_array, bound_mask_array
 
@@ -540,7 +539,7 @@ class Regolith(PCM):
 
 
 class Iron(PCM):
-    T_m, LH, rho, T_a = 1810, 247, 7.87, 293  # Units should be consistent
+    T_m, LH, rho, T_a = 1810, 247000, 7870, 293  # Units should be consistent
     c_solid = 0.449  # specific heat of solid iron in J/g°C
     c_liquid = 0.82  # specific heat of liquid iron in J/g°C
 
@@ -560,57 +559,91 @@ class Iron(PCM):
 
     def generate_data(self, x_max, t_max):
         x_grid = np.arange(0, x_max, self.dx)
-        t_grid = np.arange(self.dt, t_max, self.dt)  # Include initial condition at t=0
+        t_grid = np.arange(self.dt, t_max, self.dt)  # Start from self.dt to avoid t=0 in analytical solutions.
 
-        # Generate features for each (x,t) pair
-        x_features = np.array([[x, t] for x in x_grid for t in t_grid], dtype=np.float64)
+        # Generate features for each (x, t) pair using meshgrid and flattening
+        X, T = np.meshgrid(x_grid, t_grid, indexing='ij')
+        x_features = np.column_stack([X.ravel(), T.ravel()])  # Vectorized generation of x_features
 
-        # Initialize temperatures for PINN inputs: Ambient temperature everywhere except for the initial condition
-        y_T = np.full(len(x_features), self.T_a, dtype=np.float64)
-        initial_conditions_indices = np.where(x_features[:, 1] == 0)[0]
-        y_T[initial_conditions_indices] = self.T_m
-        y_T[0] = self.T_m  # Ensuring the very first cell is T_m
+        # Initialize temperatures for PINN inputs: Ambient temperature everywhere
+        y_T = np.full(x_features.shape[0], self.T_a, dtype=np.float64)
+
+        # Identify the indices where x = 0 for all t to apply a special boundary condition
+        boundary_condition_indices = x_features[:, 0] == 0
+
+        # Set the temperature at x = 0 to be higher than T_m to initiate melting
+        y_T[boundary_condition_indices] = self.T_m + 10.0
 
         # Assuming boundary conditions similar to y_T for simplicity
-        y_B = np.full(len(x_features), self.T_a, dtype=np.float64)
-        # Set boundary conditions: For simplicity, setting similar to initial condition of y_T
-        y_B[initial_conditions_indices] = self.T_m
-        y_B[0] = self.T_m  # Boundary condition at x=0 for t=0
+        y_B = y_T.copy()  # Direct copy since initial and boundary conditions are assumed similar
 
+        # No need to separately copy x_features for boundary conditions if they are identical
         x_boundary = x_features.copy()
 
         return x_features, y_T, y_B, x_boundary, x_grid, t_grid
 
+    # def generate_data(self, x_max, t_max):
+    #     x_grid = np.arange(0, x_max, self.dx)
+    #     t_grid = np.arange(self.dt, t_max, self.dt)  # Start from self.dt to avoid t=0 in analytical solutions.
+    #
+    #     # Generate features for each (x, t) pair using meshgrid and flattening
+    #     X, T = np.meshgrid(x_grid, t_grid, indexing='ij')
+    #     x_features = np.column_stack([X.ravel(), T.ravel()])  # Vectorized generation of x_features
+    #
+    #     # Initialize temperatures for PINN inputs: Ambient temperature everywhere
+    #     y_T = np.full(x_features.shape[0], self.T_a, dtype=np.float64)
+    #
+    #     # Identify the indices where x = 0 for all t to apply a special boundary condition
+    #     boundary_condition_indices = x_features[:, 0] == 0
+    #
+    #     # Set the temperature at x = 0 to be higher than T_m to initiate melting
+    #     y_T[boundary_condition_indices] = self.T_m + 10.0
+    #
+    #     # Assuming boundary conditions similar to y_T for simplicity
+    #     y_B = y_T.copy()  # Direct copy since initial and boundary conditions are assumed similar
+    #
+    #     # No need to separately copy x_features for boundary conditions if they are identical
+    #     x_boundary = x_features.copy()
+    #
+    #     return x_features, y_T, y_B, x_boundary, x_grid, t_grid
+
     def explicitNumerical(self, x_arr, tmax, cls, phase_mask_array=None, boundary_mask_array=None):
         nx = len(x_arr)
-        t_steps = int(np.ceil((tmax - cls.dt) / cls.dt))
-        T_arr = np.full((nx, t_steps), cls.T_a, dtype=np.float64)
-        T_arr[0, 0] = cls.T_m  # Apply the left boundary condition for all timesteps
+        T_arr = np.full((nx, 1), self.T_a, dtype=np.float64)  # Initialize temperature array
+        T_arr[0, 0] = self.T_m + 10.0  # Apply the left boundary condition for the initial timestep
 
-        # Pre-calculate constant values outside the loop
-        dx_squared = cls.dx ** 2
-        dt_over_dx_squared = cls.dt / dx_squared
+        if phase_mask_array is None:
+            phase_mask_array = np.zeros(nx, dtype=int)
+        if boundary_mask_array is None:
+            boundary_mask_array = np.zeros(nx, dtype=int)
 
-        for t_idx in range(1, t_steps):
-            T_old = T_arr[:, t_idx - 1]
-            k_values = np.full(nx, cls.k)  # Assuming thermal conductivity is constant for simplification
+        alpha = self.k / (self.rho * self.c)  # Thermal diffusivity
+        time_elapsed = 0.0
+        t_arr = [time_elapsed]  # Start tracking time steps from 0
 
-            # Calculate the diffusive term with stability check to prevent overflow
+        # Time stepping loop
+        while time_elapsed < tmax:
+            T_old = T_arr[:, -1]
+            dt = min(self.dt, (0.5 * self.dx ** 2) / alpha)  # Calculate safe time step
+
+            if time_elapsed + dt > tmax:
+                dt = tmax - time_elapsed  # Adjust dt to not overshoot tmax
+
+            # Calculate the diffusive term using FTCS
             diffusive_term = (np.roll(T_old, -1) - 2 * T_old + np.roll(T_old, 1))
-            # Safeguard against potential overflow
-            diffusive_term = np.clip(diffusive_term, -1e5, 1e5)
+            T_new = T_old + (alpha * dt / self.dx ** 2) * diffusive_term
 
-            # Update temperature values using explicit scheme
-            T_new = T_old + dt_over_dx_squared * k_values * diffusive_term
-            T_new = np.clip(T_new, cls.T_a, cls.T_m + 500)  # Prevent overflow by limiting temperature range
+            # Apply boundary conditions
+            T_new[0] = self.T_m + 10.0  # Left boundary condition
+            T_new[-1] = T_old[-1]  # Right boundary condition (can be adjusted as needed)
 
-            # Enforce boundary conditions
-            T_new[-1] = T_new[-2]  # Neumann boundary condition at the right end (insulated)
-            T_new[0] = cls.T_m  # Dirichlet boundary condition at the left end
+            T_arr = np.hstack((T_arr, T_new[:, np.newaxis]))  # Append new temperatures
+            phase_mask_array, boundary_mask_array = compute_mask_arrays(T_new, cls)
 
-            T_arr[:, t_idx] = T_new
+            time_elapsed += dt
+            t_arr.append(time_elapsed)  # Track each time step used
 
-        return T_arr, phase_mask_array, boundary_mask_array
+        return T_arr, phase_mask_array, boundary_mask_array, np.array(t_arr)
 
     def implicitSol(self, x_arr, tmax, cls, phase_mask_array=None, boundary_mask_array=None):
         # if boundary_mask_array is None:
@@ -648,18 +681,22 @@ class Iron(PCM):
             A[-1, -1] = 1
             A[-1, -2] = -1
             b[-1] = 0  # Zero gradient at the far end to mimic semi-infinite behavior
-
+            # print("T_arr shape before:", T_arr.shape)
+            # print("H_arr shape before:", H_arr.shape)
             try:
                 lu, piv = lu_factor(A)
                 T_new = lu_solve((lu, piv), b)
 
                 # Calculate new enthalpy based on updated temperature
                 H_new = cls.calcEnthalpy2(T_new, cls)
-
+                # print("T_new shape:", T_new.shape)
+                # print("H_new shape:", H_new.shape)
                 # Update arrays with new values
                 T_arr = np.hstack((T_arr, T_new[:, np.newaxis]))
                 H_arr = np.hstack((H_arr, H_new[:, np.newaxis]))
                 mask_new = np.where(T_new < cls.T_m, 0, np.where(T_new > cls.T_m, 1, 2))
+                if phase_mask_array.ndim == 1:
+                    phase_mask_array = phase_mask_array.reshape(-1, 1)  # Reshape to 2D with one column
                 phase_mask_array = np.hstack((phase_mask_array, mask_new[:, np.newaxis]))
 
                 t += cls.dt
@@ -671,9 +708,18 @@ class Iron(PCM):
         return T_arr, H_arr, np.array(t_arr), phase_mask_array, boundary_mask_array
 
     def calcThermalConductivity(self, temp):
-        k = 0.95 - 0.64 * 10 ** -3 * temp + 0.67 * 1e-6 * temp ** 2
-        # print(f"Calculating k for temp={temp}: k = {k}")
-        return k
+        """Calculate the thermal conductivity of iron based on its phase (solid or liquid).
+
+        Args:
+            temp (float): Temperature in degrees Celsius.
+
+        Returns:
+            float: Thermal conductivity in W/m·K.
+        """
+        if temp < self.T_m:
+            return 73  # Thermal conductivity for solid iron in W/m·K
+        else:
+            return 35  # Thermal conductivity for liquid iron in W/m·K
 
     def calcSpecificHeat(self, temp):
         return np.where(temp < Iron.T_m, Iron.c_solid, Iron.c_liquid)

@@ -171,14 +171,14 @@ class App:
         # Create the main window
         self.root = tk.Tk()
         self.root.wm_title("Embedding in Tk")
-        self.root.geometry("1200x800")
+        # self.root.geometry("1200x800")
         self.root.configure(bg='white')
         self.root.title("Heat Conduction")
         self.root.grid_anchor("center")
 
         # Create a frame to hold the scale and the line plot
         self.frame = tk.Frame(self.root)
-        self.frame.grid(row=0, column=0, columnspan=2, sticky='n')  # Span the frame across columns
+        self.frame.grid(row=0, column=0, columnspan=3, sticky='n')  # Span the frame across columns
 
         # Create the scale widget
         self.time_scale = tk.Scale(self.root, from_=0, to=self.t_max, resolution=self.pcm.dt,
@@ -246,12 +246,12 @@ class App:
         self.frame.grid_columnconfigure(0, weight=1)
 
         # Create the text widget and add the contents of the file
-        self.text_output = tk.Text(self.root)
+        # self.text_output = tk.Text(self.root)
         self.v = tk.Scrollbar(self.root, orient='vertical')
         # Grid the widgets
         self.canvas1.get_tk_widget().grid(row=1, column=0, sticky='nsew')
-        self.canvas2.get_tk_widget().grid(row=2, column=0, sticky='nsew')
-        self.text_output.grid(row=2, column=1, sticky='nsew')
+        self.canvas2.get_tk_widget().grid(row=1, column=2, sticky='nsew')
+        # self.text_output.grid(row=2, column=1, sticky='nsew')
 
         # Configure the main window to distribute extra space among the widgets
         self.root.grid_rowconfigure(1, weight=1)
@@ -320,7 +320,7 @@ class App:
         self.initial_data_T = (self.x, self.y_T)
         self.initial_data_B = (self.x_boundary, self.y_B)
         # self.mask_array_T_incremental = np.zeros((self.y_T.shape[0], 1))
-        self.T_arr_numerical, self.temp_mask_array_numerical, self.bound_mask_array_numerical = \
+        self.T_arr_numerical, self.temp_mask_array_numerical, self.bound_mask_array_numerical, self.t_arr5 = \
             self.pcm.explicitNumerical(self.x_grid, self.t_max, self.pcm, phase_mask_array=self.mask_array_T,
                                       boundary_mask_array=self.mask_array_B)
 
@@ -376,13 +376,13 @@ class App:
         self.t_arr_final = self.t_grid
         if selected_solution == "Analytical":
             self.T_arr_to_display = self.T_arr_analytical
-
             self.temp_mask_array = self.temp_mask_array_analytical
             self.bound_mask_array = self.bound_mask_array_analytical
         elif selected_solution == "Numerical":
             self.T_arr_to_display = self.T_arr_numerical
             self.temp_mask_array = self.temp_mask_array_numerical
             self.bound_mask_array = self.bound_mask_array_numerical
+            self.t_arr_final = self.t_arr5
         elif selected_solution == "Implicit":
             self.T_arr_to_display = self.T_arr_implicit
             self.t_arr_final = self.t_arr4
@@ -414,8 +414,6 @@ class App:
             else:
                 print("No gold standard solution was selected. PINN training aborted.")
 
-
-
     def prepare_PINN_model_and_train(self):
         # Validate the necessary components
         if self.gold_standard_temp_array is None:
@@ -429,8 +427,8 @@ class App:
         self.boundary_indices = self.pcm.calculate_boundary_indices(
             self.x, self.L, self.pcm.dt, T=self.gold_standard_temp_array, T_m=self.pcm.T_m, mode='initial')
 
-        # Define the batch size for training
-        self.batch_size = 64
+        # Define the batch size for training based on the input shape
+        self.batch_size = tf.shape(self.x_input)[0]  # Dynamically determine batch size
 
         # Initialize the PINN model
         self.model = CustomPINNModel(
@@ -450,7 +448,10 @@ class App:
             temp_mask_array=self.temp_mask_array,
             initial_data_T=self.initial_data_T,
             initial_data_B=self.initial_data_B,
-            moving_boundary_locations=self.moving_boundary_locations
+            moving_boundary_locations=self.moving_boundary_locations,
+            pcm=self.pcm,
+            x_input=self.x_input,
+            gold_standard=self.gold_standard_temp_array
         )
 
         # Call the train_PINN function to train the model
@@ -460,8 +461,6 @@ class App:
             x_boundary=self.x_boundary_input,
             y_T=self.y_T,
             y_B=self.y_B,
-            T_arr_display=self.gold_standard,
-            pcm=self.pcm,
             epochs=25,
             mask_T=self.mask_array_T.ravel(),
             mask_B=self.mask_array_B.ravel(),
