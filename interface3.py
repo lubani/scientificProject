@@ -295,81 +295,52 @@ class App:
             self.update_plots()
 
     def calcAll(self):
-        # Generate data
         self.x, self.y_T, self.y_B, self.x_boundary, self.x_grid, self.t_grid = self.pcm.generate_data(self.L,
-                                                                                                            self.t_max)
-
-        # Adjust dimensions of x to align with y_T, y_B for PINN
+                                                                                                       self.t_max)
         self.x = np.squeeze(self.x)
-
-        # Reshape y_T_flat to 2D for traditional methods, assuming y_T_flat is ordered by x then t
         nx = len(self.x_grid)
         nt = len(self.t_grid)
         y_T_2D = self.y_T.reshape(nx, nt)
 
-        # Now that y_T_2D is in the correct shape, compute mask arrays
-        self.mask_array_T, self.mask_array_B = compute_mask_arrays(y_T_2D, self.pcm)
-        # print("Debug: Shape of flat_mask_array_T:", flat_mask_array_T.shape)
-        # print("Debug: Shape of flat_mask_array_B:", flat_mask_array_B.shape)
+        # Update phase masks
+        self.mask_array_T = self.pcm.update_phase_mask(y_T_2D, self.pcm)
+        self.mask_array_B = self.pcm.update_phase_mask(y_T_2D, self.pcm)
 
-        # # Reshape the flat mask arrays to 2D for use in traditional methods
-        # self.mask_array_T = flat_mask_array_T.reshape(len(self.x_grid), nt)
-        # self.mask_array_B = flat_mask_array_B.reshape(len(self.x_grid), nt)
-
-        # Store initial and boundary conditions for PINN
         self.initial_data_T = (self.x, self.y_T)
         self.initial_data_B = (self.x_boundary, self.y_B)
-        # self.mask_array_T_incremental = np.zeros((self.y_T.shape[0], 1))
+
+        # Numerical solution
         self.T_arr_numerical, self.temp_mask_array_numerical, self.bound_mask_array_numerical, self.t_arr5 = \
             self.pcm.explicitNumerical(self.x_grid, self.t_max, self.pcm, phase_mask_array=self.mask_array_T,
-                                      boundary_mask_array=self.mask_array_B)
+                                       boundary_mask_array=self.mask_array_B)
 
+        # Analytical solution
         self.T_arr_analytical, self.temp_mask_array_analytical, self.bound_mask_array_analytical = \
             self.pcm.analyticalSol(self.x_grid, self.t_grid, self.pcm, phase_mask_array=self.mask_array_T,
-                                 bound_mask_array=self.mask_array_B)
+                                   bound_mask_array=self.mask_array_B)
 
+        # Implicit solution
         self.T_arr_implicit, self.H_arr_final, self.t_arr4, self.temp_mask_array_implicit, self.bound_mask_array_implicit = \
             self.pcm.implicitSol(self.x_grid, self.t_max, self.pcm, phase_mask_array=self.mask_array_T,
                                  boundary_mask_array=self.mask_array_B)
 
+        # Enthalpy method solution
         self.T_arr_enth, self.H_arr_enth, self.temp_mask_array_stefan, self.bound_mask_array_stefan = \
             self.pcm.solve_stefan_problem_enthalpy(self.pcm, self.L, self.t_max, phase_mask_array=self.mask_array_T,
                                                    boundary_mask_array=self.mask_array_B)
-        print(f"T_arr_enth = {self.T_arr_enth}")
-        print(f"H_arr_enth = {self.H_arr_enth}")
-        print(f"temp_mask_array_stefan = {self.temp_mask_array_stefan}")
-        print(f"bound_mask_array_stefan = {self.bound_mask_array_stefan}")
-        # self.H_arr_final = self.H_arr_enth
-        # print(f"Debug: self.x_grid length = {len(self.x_grid)}")
-        # print(f"Debug: self.t_grid length = {len(self.t_grid)}")
-        # Store temperature arrays for each solution type
+
+        # Storing solutions for comparison and plotting
         self.temperature_solutions = {
             "Analytical": self.T_arr_analytical,
             "Numerical": self.T_arr_numerical,
             "Implicit": self.T_arr_implicit,
             "Enthalpy Method": self.T_arr_enth,
-            # Add other solution types if necessary
         }
 
-        moving_boundary_indices = self.pcm.calculate_moving_boundary_indices(self.T_arr_analytical, self.pcm.T_m)
-        print("Debug: Moving boundary indices = ", moving_boundary_indices)
-        # Convert indices to actual spatial locations if needed
-        dx = self.pcm.dx
-
-        for i, val in enumerate(moving_boundary_indices):
-            if val is not None:
-                self.moving_boundary_locations.append(val * dx)
-                self.indices.append(i)
-
-        self.moving_boundary_locations = np.array(self.moving_boundary_locations)
-        self.indices = np.array(self.indices)
-        # self.mask_array = compute_mask_array(self.x_grid, self.L)
         self.update_solution_type()
         self.update_plots()
 
-
     def update_solution_type(self, *args):
-
         selected_solution = self.solution_type.get()
 
         # print(f"Debug: Selected solution type = {selected_solution}")
@@ -428,7 +399,16 @@ class App:
             self.x, self.L, self.pcm.dt, T=self.gold_standard_temp_array, T_m=self.pcm.T_m, mode='initial')
 
         # Define the batch size for training based on the input shape
-        self.batch_size = tf.shape(self.x_input)[0]  # Dynamically determine batch size
+        self.batch_size = min(1024, self.x_input.shape[0])  # Ensure batch size does not exceed available data
+
+        # Debugging statements
+        print(f"Debug: x_input shape = {self.x_input.shape}, x_boundary_input shape = {self.x_boundary_input.shape}")
+        print(f"Debug: batch_size = {self.batch_size}")
+
+        # Ensure the mask arrays have the correct shape
+        if len(self.temp_mask_array.shape) == 1:
+            self.temp_mask_array = self.temp_mask_array.reshape(self.x_input.shape[0], -1)
+            self.bound_mask_array = self.bound_mask_array.reshape(self.x_input.shape[0], -1)
 
         # Initialize the PINN model
         self.model = CustomPINNModel(
@@ -453,6 +433,10 @@ class App:
             x_input=self.x_input,
             gold_standard=self.gold_standard_temp_array
         )
+
+        # Debugging mask arrays
+        print(
+            f"Debug: temp_mask_array shape = {self.temp_mask_array.shape}, bound_mask_array shape = {self.bound_mask_array.shape}")
 
         # Call the train_PINN function to train the model
         self.loss_values, self.accuracy_values, self.Temperature_pred, self.Boundary_pred = train_PINN(

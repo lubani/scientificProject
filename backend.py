@@ -23,6 +23,7 @@ def compute_mask_arrays(T, cls, tolerance=50, phase_mask=None, boundary_mask=Non
     return phase_mask, boundary_mask
 
 
+
 # def compute_mask_arrays(T, cls, tolerance=50, phase_mask=None, boundary_mask=None):
 #     if phase_mask is None:
 #         phase_mask = np.zeros_like(T, dtype=int)
@@ -135,7 +136,6 @@ class PCM(ABC):
         return temp
 
     def update_phase_mask(self, temperature_array, cls):
-        # Adjust tolerance for phase transition detection
         tolerance = 50
         return np.select(
             [temperature_array < cls.T_m - tolerance, temperature_array > cls.T_m + tolerance],
@@ -145,7 +145,6 @@ class PCM(ABC):
 
     def calculate_boundary_indices(self, x, x_max, dt, T=None, T_m=None, tolerance=100, mode='initial', atol=1e-8,
                                    rtol=1e-5):
-        # Check for the correct structure of x
         if x.ndim != 2 or x.shape[1] != 2:
             raise ValueError("Input array x must have shape [n_points, 2] for spatial and temporal indices.")
         if mode == 'initial':
@@ -173,7 +172,6 @@ class PCM(ABC):
             raise ValueError("Invalid mode. Choose between 'initial' and 'moving_boundary'")
 
     def calculate_moving_boundary_indices(self, T, T_m, tolerance=100):
-        # Initialize with -1 to indicate no boundary found
         moving_boundary_indices = np.full(T.shape[1], -1, dtype=int)
         abs_diff = np.abs(T - T_m)
         for n in range(T.shape[1]):
@@ -215,7 +213,6 @@ class PCM(ABC):
                 initial_H = cls.LH + cls.rho * cls.c_liquid * (T_initial - cls.T_m)
             H_arr[i, :] = initial_H
         return H_arr
-
 
     def calcEnthalpy2(self, T, cls):
         conditions = [
@@ -559,25 +556,16 @@ class Iron(PCM):
 
     def generate_data(self, x_max, t_max):
         x_grid = np.arange(0, x_max, self.dx)
-        t_grid = np.arange(self.dt, t_max, self.dt)  # Start from self.dt to avoid t=0 in analytical solutions.
+        t_grid = np.arange(self.dt, t_max, self.dt)
 
-        # Generate features for each (x, t) pair using meshgrid and flattening
         X, T = np.meshgrid(x_grid, t_grid, indexing='ij')
-        x_features = np.column_stack([X.ravel(), T.ravel()])  # Vectorized generation of x_features
+        x_features = np.column_stack([X.ravel(), T.ravel()])
 
-        # Initialize temperatures for PINN inputs: Ambient temperature everywhere
         y_T = np.full(x_features.shape[0], self.T_a, dtype=np.float64)
-
-        # Identify the indices where x = 0 for all t to apply a special boundary condition
         boundary_condition_indices = x_features[:, 0] == 0
-
-        # Set the temperature at x = 0 to be higher than T_m to initiate melting
         y_T[boundary_condition_indices] = self.T_m + 10.0
 
-        # Assuming boundary conditions similar to y_T for simplicity
-        y_B = y_T.copy()  # Direct copy since initial and boundary conditions are assumed similar
-
-        # No need to separately copy x_features for boundary conditions if they are identical
+        y_B = y_T.copy()
         x_boundary = x_features.copy()
 
         return x_features, y_T, y_B, x_boundary, x_grid, t_grid
@@ -609,21 +597,22 @@ class Iron(PCM):
 
     def explicitNumerical(self, x_arr, tmax, cls, phase_mask_array=None, boundary_mask_array=None):
         nx = len(x_arr)
-        T_arr = np.full((nx, 1), self.T_a, dtype=np.float64)  # Initialize temperature array
+        num_timesteps = int(tmax / self.dt) # Calculate the number of timesteps
+        T_arr = np.full((nx, num_timesteps), self.T_a, dtype=np.float64)  # Initialize temperature array
         T_arr[0, 0] = self.T_m + 10.0  # Apply the left boundary condition for the initial timestep
 
         if phase_mask_array is None:
-            phase_mask_array = np.zeros(nx, dtype=int)
+            phase_mask_array = np.zeros((nx, num_timesteps), dtype=int)
         if boundary_mask_array is None:
-            boundary_mask_array = np.zeros(nx, dtype=int)
+            boundary_mask_array = np.zeros((nx, num_timesteps), dtype=int)
 
-        alpha = self.k / (self.rho * self.c)  # Thermal diffusivity
+        alpha = cls.alpha(self.k, self.c, self.rho)  # Thermal diffusivity using the alpha method
         time_elapsed = 0.0
         t_arr = [time_elapsed]  # Start tracking time steps from 0
 
-        # Time stepping loop
-        while time_elapsed < tmax:
-            T_old = T_arr[:, -1]
+        timestep = 0
+        while time_elapsed < tmax and timestep < num_timesteps - 1:
+            T_old = T_arr[:, timestep]
             dt = min(self.dt, (0.5 * self.dx ** 2) / alpha)  # Calculate safe time step
 
             if time_elapsed + dt > tmax:
@@ -637,29 +626,34 @@ class Iron(PCM):
             T_new[0] = self.T_m + 10.0  # Left boundary condition
             T_new[-1] = T_old[-1]  # Right boundary condition (can be adjusted as needed)
 
-            T_arr = np.hstack((T_arr, T_new[:, np.newaxis]))  # Append new temperatures
-            phase_mask_array, boundary_mask_array = compute_mask_arrays(T_new, cls)
+            timestep += 1
+            if timestep < num_timesteps:  # Ensure the timestep does not exceed the array size
+                T_arr[:, timestep] = T_new  # Append new temperatures
+                phase_mask_array[:, timestep] = cls.update_phase_mask(T_new, cls)
+                boundary_mask_array[:, timestep] = cls.update_phase_mask(T_new, cls)
 
             time_elapsed += dt
             t_arr.append(time_elapsed)  # Track each time step used
 
-        return T_arr, phase_mask_array, boundary_mask_array, np.array(t_arr)
+        return T_arr, phase_mask_array.flatten(), boundary_mask_array.flatten(), np.array(t_arr)
 
     def implicitSol(self, x_arr, tmax, cls, phase_mask_array=None, boundary_mask_array=None):
-        # if boundary_mask_array is None:
-        #     phase_mask_array, boundary_mask_array = self.compute_mask_arrays(x_arr, int(tmax / cls.dt), cls)
-
         num_segments = len(x_arr)
-        t_arr = [cls.dt]  # Time array
-        T_arr = np.full((num_segments, 1), cls.T_a)  # Initialize temperature array
-        H_arr = np.ones((num_segments, 1)) * cls.calcEnthalpy2(T_arr[:, 0], cls)  # Initialize enthalpy array
+        t_arr = [cls.dt]
+        T_arr = np.full((num_segments, 1), cls.T_a)
+        H_arr = np.ones((num_segments, 1)) * cls.calcEnthalpy2(T_arr[:, 0], cls)
+
+        if phase_mask_array is None:
+            phase_mask_array = np.zeros((num_segments, 1), dtype=int)
+        if boundary_mask_array is None:
+            boundary_mask_array = np.zeros((num_segments, 1), dtype=int)
 
         t = cls.dt
         while t < tmax:
             T_old = T_arr[:, -1]
             H_old = H_arr[:, -1]
-            A = np.zeros((num_segments, num_segments))  # Coefficient matrix
-            b = np.zeros(num_segments)  # Right-hand side vector
+            A = np.zeros((num_segments, num_segments))
+            b = np.zeros(num_segments)
 
             for i in range(1, num_segments - 1):
                 k = cls.calcThermalConductivity(T_old[i])
@@ -673,30 +667,23 @@ class Iron(PCM):
                 A[i, i + 1] = -lmbda
                 b[i] = T_old[i]
 
-            # Left boundary (Dirichlet condition)
             A[0, 0] = 1
             b[0] = cls.T_m
-
-            # Adjusted right boundary for semi-infinite slab approximation (Neumann condition)
             A[-1, -1] = 1
             A[-1, -2] = -1
-            b[-1] = 0  # Zero gradient at the far end to mimic semi-infinite behavior
-            # print("T_arr shape before:", T_arr.shape)
-            # print("H_arr shape before:", H_arr.shape)
+            b[-1] = 0
+
             try:
                 lu, piv = lu_factor(A)
                 T_new = lu_solve((lu, piv), b)
 
-                # Calculate new enthalpy based on updated temperature
                 H_new = cls.calcEnthalpy2(T_new, cls)
-                # print("T_new shape:", T_new.shape)
-                # print("H_new shape:", H_new.shape)
-                # Update arrays with new values
                 T_arr = np.hstack((T_arr, T_new[:, np.newaxis]))
                 H_arr = np.hstack((H_arr, H_new[:, np.newaxis]))
+
                 mask_new = np.where(T_new < cls.T_m, 0, np.where(T_new > cls.T_m, 1, 2))
                 if phase_mask_array.ndim == 1:
-                    phase_mask_array = phase_mask_array.reshape(-1, 1)  # Reshape to 2D with one column
+                    phase_mask_array = phase_mask_array.reshape(-1, 1)
                 phase_mask_array = np.hstack((phase_mask_array, mask_new[:, np.newaxis]))
 
                 t += cls.dt

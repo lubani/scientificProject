@@ -10,8 +10,7 @@ from sklearn.preprocessing import MinMaxScaler
 from tqdm import tqdm
 from keras.optimizers.schedules import ExponentialDecay
 
-
-# Removed unused imports and grouped similar imports together
+# tf.config.run_functions_eagerly(True)
 
 def scaled_sigmoid(T_a, T_m, offset=256):
     def activation(x):
@@ -66,25 +65,23 @@ class CustomPINNModel(Model):
 
         # Temperature Subnetwork with PReLU activation
         self.temperature_subnetwork = [
-            Dense(128, kernel_initializer=he_initializer, kernel_regularizer=l2(self.reg_lambda))
+            Dense(64, kernel_initializer=he_initializer, kernel_regularizer=l2(self.reg_lambda))
             for i in range(3)]
         self.temperature_subnetwork.extend([PReLU() for i in range(3)])  # adding PReLU after each Dense layer
         self.temperature_subnetwork.append(Dropout(0.3))
 
         # Boundary Subnetwork with Swish activation
         self.boundary_subnetwork = [
-            Dense(64, kernel_initializer=he_initializer, activation='swish', kernel_regularizer=l2(self.reg_lambda)) for
-            i in
-            range(2)]
+            Dense(32, kernel_initializer=he_initializer, activation='swish', kernel_regularizer=l2(self.reg_lambda)) for
+            i in range(2)]
         self.boundary_subnetwork.append(Dropout(0.3))
 
         # Batch Normalization Layers
         self.batch_norm_layers = [BatchNormalization() for i in range(5)]
 
         # Shared Layers with PReLU activation
-        self.dense_layers = [Dense(256, kernel_initializer=he_initializer, kernel_regularizer=l2(self.reg_lambda)) for i
-                             in
-                             range(3)]
+        self.dense_layers = [Dense(128, kernel_initializer=he_initializer, kernel_regularizer=l2(self.reg_lambda)) for i
+                             in range(3)]
         self.dense_layers.extend([PReLU() for i in range(3)])  # adding PReLU after each Dense layer
         self.dense_layers.append(Dropout(0.3))
 
@@ -149,13 +146,13 @@ class CustomPINNModel(Model):
                 self.x_mean_B = 0.0
                 self.x_std_B = 1.0
 
+
     def update_loss_scales(self, new_scale_mse_T, new_scale_mse_B, new_scale_physics):
         self.scale_mse_T.assign(new_scale_mse_T)
         self.scale_mse_B.assign(new_scale_mse_B)
         self.scale_physics.assign(new_scale_physics)
 
     def is_boundary_func(self):
-        # Use stored attributes for calculations
         initial_boundary_indices = self.pcm.calculate_boundary_indices(
             x=self.x, x_max=self.x_max, dt=self.pcm.dt, mode='initial'
         )
@@ -163,15 +160,13 @@ class CustomPINNModel(Model):
             T=self.T_arr, T_m=self.pcm.T_m, tolerance=100
         )
 
-        # Convert initial boundary indices to boolean masks
         mask_initial_condition1 = np.zeros(self.x.shape[0], dtype=bool)
         mask_initial_condition1[initial_boundary_indices['condition1']] = True
 
         mask_initial_condition2 = np.zeros(self.x.shape[0], dtype=bool)
         mask_initial_condition2[initial_boundary_indices['condition2']] = True
 
-        # Convert moving boundary indices to boolean masks
-        mask_moving_boundary = np.zeros((self.y_T.shape[0], len(moving_boundary_indices)), dtype=bool)
+        mask_moving_boundary = np.zeros((self.x.shape[0], self.T_arr.shape[1]), dtype=bool)
         for idx, boundary_index in enumerate(moving_boundary_indices):
             if boundary_index != -1:  # Assuming -1 indicates no boundary found
                 mask_moving_boundary[boundary_index, idx] = True
@@ -281,69 +276,56 @@ class CustomPINNModel(Model):
         return {'temperature': output_T, 'boundary': output_B}
 
     def compute_loss(self, targets, y_pred, inputs):
-        # Ensure consistency in data types
         y_true_T = tf.cast(targets['temperature_output'], tf.float64)
         y_true_B = tf.cast(targets['boundary_output'], tf.float64)
 
         y_pred_T = tf.cast(y_pred['temperature'], tf.float64)
         y_pred_B = tf.cast(y_pred['boundary'], tf.float64)
 
-        # Ensure predictions are 2D
-        y_pred_T = tf.expand_dims(y_pred_T, axis=-1) if len(y_pred_T.shape) == 1 else y_pred_T
-        y_pred_B = tf.expand_dims(y_pred_B, axis=-1) if len(y_pred_B.shape) == 1 else y_pred_B
+        batch_size = tf.shape(y_true_T)[0]
 
-        # Utilize 'temperature_input' and 'boundary_input' for the branching function
+        # Reshape true and predicted values
+        y_true_T = tf.reshape(y_true_T, [batch_size, -1])
+        y_true_B = tf.reshape(y_true_B, [batch_size, -1])
+        y_pred_T = tf.reshape(y_pred_T, [batch_size, -1])
+        y_pred_B = tf.reshape(y_pred_B, [batch_size, -1])
+
         temperature_inputs = inputs['temperature_input']
         boundary_inputs = inputs['boundary_input']
 
-        # Call branching_function to get the boundary masks
-        is_temp_boundary, is_phase_boundary = self.branching_function(temperature_inputs,
-                                                                      boundary_inputs, self.temp_mask_array,
-                                                                      self.bound_mask_array)
+        is_temp_boundary, is_phase_boundary, input_dim = self.branching_function(
+            temperature_inputs, boundary_inputs, self.temp_mask_array, self.bound_mask_array
+        )
 
-        # Convert boolean masks to float64 for consistency in operations
         is_temp_boundary_float = tf.cast(is_temp_boundary, tf.float64)
         is_phase_boundary_float = tf.cast(is_phase_boundary, tf.float64)
 
-        # Adjust shapes for broadcasting
-        y_true_T = tf.expand_dims(y_true_T, axis=-1)
-        y_true_B = tf.expand_dims(y_true_B, axis=-1)
+        # Debugging shapes
+        tf.print("Debug: Shapes in compute_loss function")
+        tf.print("y_true_T shape:", y_true_T.shape)
+        tf.print("y_pred_T shape:", y_pred_T.shape)
+        tf.print("is_temp_boundary_float shape:", is_temp_boundary_float.shape)
+        tf.print("y_true_B shape:", y_true_B.shape)
+        tf.print("y_pred_B shape:", y_pred_B.shape)
+        tf.print("is_phase_boundary_float shape:", is_phase_boundary_float.shape)
 
-        # Adjust masks to the correct shape
-        batch_size = tf.shape(y_true_T)[0]
-        is_temp_boundary_float = tf.reshape(is_temp_boundary_float, [batch_size, 1])
-        is_phase_boundary_float = tf.reshape(is_phase_boundary_float, [batch_size, 1])
-
-        # Debug print shapes
-        print("y_true_T shape:", y_true_T.shape)
-        print("y_pred_T shape:", y_pred_T.shape)
-        print("is_temp_boundary_float shape:", is_temp_boundary_float.shape)
-
-        print("y_true_B shape:", y_true_B.shape)
-        print("y_pred_B shape:", y_pred_B.shape)
-        print("is_phase_boundary_float shape:", is_phase_boundary_float.shape)
-
-        # Assert shapes for debugging
         tf.debugging.assert_shapes([
             (y_true_T, ('batch', 1)),
             (y_pred_T, ('batch', 1)),
-            (is_temp_boundary_float, ('batch', 1))
+            (is_temp_boundary_float, ('batch',))
         ], message="Shape mismatch in temperature loss calculation")
 
         tf.debugging.assert_shapes([
             (y_true_B, ('batch', 1)),
             (y_pred_B, ('batch', 1)),
-            (is_phase_boundary_float, ('batch', 1))
+            (is_phase_boundary_float, ('batch',))
         ], message="Shape mismatch in boundary loss calculation")
 
-        # Compute MSE loss considering boundary conditions
         mse_loss_T = tf.reduce_mean(tf.square(y_true_T - y_pred_T) * is_temp_boundary_float)
         mse_loss_B = tf.reduce_mean(tf.square(y_true_B - y_pred_B) * is_phase_boundary_float)
 
-        # Placeholder for physics-based loss, assuming it's calculated elsewhere
         physics_loss = tf.constant(0.0, dtype=tf.float64)
 
-        # Calculate total loss
         total_loss = mse_loss_T + mse_loss_B + physics_loss
 
         return total_loss, physics_loss, mse_loss_B
@@ -407,57 +389,50 @@ class CustomPINNModel(Model):
         }
 
     def branching_function(self, temperature_inputs, boundary_inputs, temp_mask_array, bound_mask_array):
-        print("Shape before split:", temperature_inputs.shape)
-
-        # Convert the mask arrays to boolean numpy arrays first
-        temp_mask_array = np.array(temp_mask_array, dtype=bool)
-        bound_mask_array = np.array(bound_mask_array, dtype=bool)
-
-        # Convert the boolean numpy arrays to tensors
-        temp_mask_tensor = tf.convert_to_tensor(temp_mask_array, dtype=tf.bool)
-        bound_mask_tensor = tf.convert_to_tensor(bound_mask_array, dtype=tf.bool)
-
-        # Get the boundary masks
-        mask_initial_condition1, mask_initial_condition2, mask_moving_boundary = self.is_boundary_func()
-
-        # Ensure the returned masks are boolean tensors
-        mask_initial_condition1 = tf.convert_to_tensor(mask_initial_condition1, dtype=tf.bool)
-        mask_initial_condition2 = tf.convert_to_tensor(mask_initial_condition2, dtype=tf.bool)
-        mask_moving_boundary = tf.convert_to_tensor(mask_moving_boundary, dtype=tf.bool)
-
-        # Print shapes for debugging
-        print("temp_mask_tensor shape:", temp_mask_tensor.shape)
-        print("bound_mask_tensor shape:", bound_mask_tensor.shape)
-        print("mask_initial_condition1 shape:", mask_initial_condition1.shape)
-        print("mask_initial_condition2 shape:", mask_initial_condition2.shape)
-        print("mask_moving_boundary shape:", mask_moving_boundary.shape)
-
-        # Combine masks appropriately
-        is_boundary = tf.logical_or(mask_initial_condition1, mask_initial_condition2)
-        is_boundary = tf.logical_or(is_boundary, tf.reduce_any(mask_moving_boundary, axis=1))
-
-        # Dynamically get the batch size
         batch_size = tf.shape(temperature_inputs)[0]
+        input_dim = tf.shape(temperature_inputs)[1]
 
-        # Ensure temp_mask_tensor is properly shaped
-        temp_mask_tensor = tf.reshape(temp_mask_tensor[:tf.shape(is_boundary)[0]], [tf.shape(is_boundary)[0], -1])
+        # Ensure temp_mask_array and bound_mask_array are boolean
+        temp_mask_tensor = tf.convert_to_tensor(temp_mask_array == 1, dtype=tf.bool)
+        bound_mask_tensor = tf.convert_to_tensor(bound_mask_array == 1, dtype=tf.bool)
 
-        # Adjust the shape of the boundary tensor to match the batch size
-        bound_mask_tensor = tf.reshape(bound_mask_tensor[:tf.shape(is_boundary)[0]], [tf.shape(is_boundary)[0], -1])
+        if len(temp_mask_tensor.shape) == 1:
+            temp_mask_tensor = tf.reshape(temp_mask_tensor, [-1, 1])
+            bound_mask_tensor = tf.reshape(bound_mask_tensor, [-1, 1])
 
-        # Ensure is_boundary matches the shape of bound_mask_tensor
-        is_boundary = tf.reshape(is_boundary, [tf.shape(is_boundary)[0], 1])
+        num_spatial_points = tf.shape(temp_mask_tensor)[0]
+        num_time_steps = tf.shape(temp_mask_tensor)[1]
 
-        # Apply masks to determine temperature and phase boundaries
-        is_temp_boundary = tf.logical_and(is_boundary, temp_mask_tensor)
-        is_phase_boundary = tf.logical_and(is_boundary, bound_mask_tensor)
+        # Debugging statements to trace shapes
+        print(f"Debug: batch_size = {batch_size}, input_dim = {input_dim}")
+        print(
+            f"Debug: temp_mask_tensor.shape = {temp_mask_tensor.shape}, bound_mask_tensor.shape = {bound_mask_tensor.shape}")
+        print(f"Debug: num_spatial_points = {num_spatial_points}, num_time_steps = {num_time_steps}")
 
-        # Print shapes for debugging
-        print("is_boundary shape:", is_boundary.shape)
-        print("is_temp_boundary shape:", is_temp_boundary.shape)
-        print("is_phase_boundary shape:", is_phase_boundary.shape)
+        # Tile the mask tensors to match the batch size
+        temp_mask_tensor_tiled = tf.tile(temp_mask_tensor, [1, num_time_steps])
+        bound_mask_tensor_tiled = tf.tile(bound_mask_tensor, [1, num_time_steps])
 
-        return is_temp_boundary, is_phase_boundary
+        # Flatten the tiled mask tensors
+        temp_mask_tensor_flat = tf.reshape(temp_mask_tensor_tiled, [-1])
+        bound_mask_tensor_flat = tf.reshape(bound_mask_tensor_tiled, [-1])
+
+        # Ensure the shapes of the inputs and masks match
+        boundary_inputs_flat = tf.reshape(boundary_inputs[:, 1], [-1])
+        is_boundary_flat_bool = tf.cast(boundary_inputs_flat, tf.bool)
+
+        # Debugging statements to trace final shapes
+        print(
+            f"Debug: temp_mask_tensor_flat.shape = {temp_mask_tensor_flat.shape}, bound_mask_tensor_flat.shape = {bound_mask_tensor_flat.shape}")
+        print(f"Debug: boundary_inputs_flat.shape = {boundary_inputs_flat.shape}")
+
+        is_temp_boundary = tf.logical_and(is_boundary_flat_bool,
+                                          temp_mask_tensor_flat[:tf.shape(is_boundary_flat_bool)[0]])
+        is_phase_boundary = tf.logical_and(is_boundary_flat_bool,
+                                           bound_mask_tensor_flat[:tf.shape(is_boundary_flat_bool)[0]])
+
+        return is_temp_boundary, is_phase_boundary, input_dim
+
 
 
 class MaskedCustomLoss(Loss):
