@@ -1,26 +1,35 @@
 import math
 from abc import ABC, abstractmethod
 import numpy as np
-from keras.src.backend import flatten
+from scipy.sparse import diags
+from scipy.sparse.linalg import splu
+from tensorflow.keras.layers import Flatten  # Use the Flatten layer from tensorflow.keras
 from scipy.linalg import lu_factor, lu_solve
 from scipy.special import erf
-
 
 
 def compute_mask_arrays(T, cls, tolerance=50, phase_mask=None, boundary_mask=None):
     if phase_mask is None:
         phase_mask = np.zeros_like(T, dtype=int)
+    if boundary_mask is None:
+        boundary_mask = np.zeros_like(T, dtype=int)
+
+    print(f"Debug: Temperature array T:\n{T}")
+    print(f"Debug: Melting temperature T_m: {cls.T_m}")
+
     phase_mask[:] = 0
     phase_mask[T < cls.T_m - tolerance] = 0
     phase_mask[(T >= cls.T_m - tolerance) & (T <= cls.T_m + tolerance)] = 1
     phase_mask[T > cls.T_m + tolerance] = 2
 
-    if boundary_mask is None:
-        boundary_mask = np.zeros_like(T, dtype=int)
     boundary_mask[:] = 0
     boundary_mask[phase_mask == 1] = 1
 
+    print(f"Debug: Phase mask:\n{phase_mask}")
+    print(f"Debug: Boundary mask:\n{boundary_mask}")
+
     return phase_mask, boundary_mask
+
 
 
 
@@ -40,7 +49,6 @@ def compute_mask_arrays(T, cls, tolerance=50, phase_mask=None, boundary_mask=Non
 #     return phase_mask, boundary_mask
 
 
-
 class PCM(ABC):
 
     @abstractmethod
@@ -55,49 +63,82 @@ class PCM(ABC):
     def generate_data(self, x_max, t_max):
         pass
 
+    @abstractmethod
+    def implicitSol(self, x_arr, t_arr, T_arr, H_arr, cls, phase_mask_array=None, boundary_mask_array=None):
+        pass
+
+    @abstractmethod
+    def explicitNumerical(self, x_arr, t_arr, T_arr, cls, phase_mask_array=None, boundary_mask_array=None):
+        pass
+
     def alpha(self, k, c, rho):
         # Check for division by zero or small number
         if c * rho == 0 or k == 0:
             raise ValueError("c * rho should not be zero")
         return k / (c * rho)
 
-    def solve_stefan_problem_enthalpy(self, cls, L, t_max, phase_mask_array=None, boundary_mask_array=None):
-        # Initial setup
-        x_arr = np.arange(0, L, cls.dx)
-        t_arr = np.arange(cls.dt, t_max, cls.dt)
-        T, H = self.initialize_enthalpy_temperature_arrays(x_arr, cls, len(t_arr))
+    def solve_stefan_problem_enthalpy(self, cls, x_arr, t_arr, T_arr, H_arr, temp_mask_array=None,
+                                      bound_mask_array=None):
+        print("Debug: Entering solve_stefan_problem_enthalpy")
 
-        # Ensure mask arrays are 1D and match the spatial domain size
-        if phase_mask_array is None or boundary_mask_array is None:
-            phase_mask_array, boundary_mask_array = compute_mask_arrays(T[:, 0], cls)
+        if temp_mask_array is None or bound_mask_array is None:
+            temp_mask_array = np.zeros((len(x_arr), len(t_arr)), dtype=int)
+            bound_mask_array = np.zeros((len(x_arr), len(t_arr)), dtype=int)
 
-        heat_source_max = 1000  # Further increased heat source value
-        cycle_duration = t_max / 2  # Assuming the heat source is active for half the duration
+        boundary_indices = None
 
-        for n in range(len(t_arr) - 1):
-            # Dynamically calculate time step size for stability
-            k_values = [self.calcThermalConductivity(temp) for temp in T[:, n]]
-            max_k = np.max(k_values)
-            dt_current = self.calculate_dt(cls, max_k)
-            gamma = self.update_gamma(cls, T[:, n], dt_current)
+        for t_idx in range(len(t_arr)):
+            try:
+                H_old = H_arr[:, t_idx - 1] if t_idx > 0 else H_arr[:, 0]
 
-            # Update enthalpy and temperature with a heat source term
-            H[:, n + 1], T[:, n + 1] = self.update_enthalpy_temperature(H[:, n], cls, gamma, x_arr)
+                k_vals = np.array([cls.calcThermalConductivity(H_old[i]) for i in range(1, len(x_arr) - 1)])
+                c_vals = np.array([cls.calcSpecificHeat(H_old[i]) for i in range(1, len(x_arr) - 1)])
+                alpha_vals = k_vals / (cls.rho * c_vals)
+                lmbda_vals = cls.dt / cls.dx ** 2 * alpha_vals
 
-            # Apply heat source to the left boundary
-            heat_source = self.heat_source_function(t_arr[n], cycle_duration, heat_source_max)
-            H[0, n + 1] += heat_source * dt_current
+                diagonals = [
+                    -lmbda_vals,
+                    1 + 2 * lmbda_vals,
+                    -lmbda_vals
+                ]
+                A = diags(diagonals, offsets=[-1, 0, 1], shape=(len(x_arr) - 2, len(x_arr) - 2), format='csc')
 
-            # Reapply boundary conditions if necessary, considering the 1D boundary mask
-            if boundary_mask_array is not None:
-                boundary_indices = np.where(boundary_mask_array == 1)[0]
-                T[boundary_indices, n + 1] = cls.T_m
+                b = H_old[1:-1]
+                b[0] += cls.T_m
+                b[-1] -= 0
 
-            # Update phase mask based on new temperature profile
-            if phase_mask_array is not None:
-                phase_mask_array, boundary_mask_array = compute_mask_arrays(T[:, n + 1], cls)
+                lu = splu(A)
+                H_new_internal = lu.solve(b)
+                H_new = np.zeros(len(x_arr))
+                H_new[1:-1] = H_new_internal
+                H_new[0] = cls.T_m
+                H_new[-1] = H_new[-2]
 
-        return T, H, phase_mask_array, boundary_mask_array
+                T_new = self.update_temperature(H_new, cls)
+
+                H_arr[:, t_idx] = H_new
+                T_arr[:, t_idx] = T_new
+
+                temp_mask_array[:, t_idx] = self.update_phase_mask(T_new, cls)
+
+                if boundary_indices is None:
+                    x_features = np.column_stack([np.tile(x_arr, len(t_arr)), np.repeat(t_arr, len(x_arr))])
+                    boundary_indices = self.calculate_boundary_indices(x_features, x_arr[-1], cls.dt, T=T_arr,
+                                                                       T_m=cls.T_m, mode='moving_boundary')
+            except Exception as e:
+                import traceback
+                print(f"An error occurred: {e}")
+                print(traceback.format_exc())
+                break
+
+        if boundary_indices is None:
+            x_features = np.column_stack([np.tile(x_arr, len(t_arr)), np.repeat(t_arr, len(x_arr))])
+            boundary_indices = self.calculate_boundary_indices(x_features, x_arr[-1], cls.dt, T=T_arr, T_m=cls.T_m,
+                                                               mode='moving_boundary')
+
+        print(
+            f"Debug: solve_stefan_problem_enthalpy - T_arr shape: {T_arr.shape}, H_arr shape: {H_arr.shape}")
+        return T_arr, H_arr, temp_mask_array, bound_mask_array, boundary_indices
 
     def update_gamma(self, cls, temp, dt_current):
         k_max = np.max([cls.calcThermalConductivity(t) for t in temp])
@@ -145,40 +186,43 @@ class PCM(ABC):
 
     def calculate_boundary_indices(self, x, x_max, dt, T=None, T_m=None, tolerance=100, mode='initial', atol=1e-8,
                                    rtol=1e-5):
-        if x.ndim != 2 or x.shape[1] != 2:
-            raise ValueError("Input array x must have shape [n_points, 2] for spatial and temporal indices.")
         if mode == 'initial':
-            boundary_indices = {
-                'condition1': [],
-                'condition2': []
-            }
+            boundary_indices = {'condition1': [], 'condition2': []}
             dt_indices = np.isclose(x[:, 1], dt, atol=atol, rtol=rtol)
             boundary_indices['condition1'] = np.where(dt_indices & np.isclose(x[:, 0], 0, atol=atol, rtol=rtol))[0]
             boundary_indices['condition2'] = np.where(dt_indices & ~np.isclose(x[:, 0], x_max, atol=atol, rtol=rtol))[0]
+            boundary_indices['condition1'] = np.asarray(boundary_indices['condition1'])
+            boundary_indices['condition2'] = np.asarray(boundary_indices['condition2'])
             return boundary_indices
 
         elif mode == 'moving_boundary':
             if T is None or T_m is None:
                 raise ValueError(
                     "Temperature array T and melting point T_m must be provided for 'moving_boundary' mode.")
-            moving_boundary_indices = np.full(T.shape[1], -1,
-                                              dtype=int)  # Initialize with -1 to indicate no boundary found
+
+            moving_boundary_indices = np.full(T.shape[1], -1, dtype=int)
+
             for n in range(T.shape[1]):
                 phase_change_indices = np.where(np.abs(T[:, n] - T_m) <= tolerance)[0]
                 if phase_change_indices.size > 0:
                     moving_boundary_indices[n] = phase_change_indices[0]
-            return moving_boundary_indices
-        else:
-            raise ValueError("Invalid mode. Choose between 'initial' and 'moving_boundary'")
 
-    def calculate_moving_boundary_indices(self, T, T_m, tolerance=100):
-        moving_boundary_indices = np.full(T.shape[1], -1, dtype=int)
-        abs_diff = np.abs(T - T_m)
-        for n in range(T.shape[1]):
-            phase_change_indices = np.where(abs_diff[:, n] <= tolerance)[0]
+            return moving_boundary_indices
+
+        else:
+            raise ValueError("Invalid mode. Choose between 'initial' and 'moving_boundary'.")
+
+    def calculate_moving_boundary_indices(self, T_arr, T_m):
+        boundary_indices = np.full(T_arr.shape[1], -1, dtype=int)
+        for t_idx in range(T_arr.shape[1]):
+            phase_change_indices = np.where(np.abs(T_arr[:, t_idx] - T_m) < 1e-2)[0]
             if phase_change_indices.size > 0:
-                moving_boundary_indices[n] = phase_change_indices[0]
-        return moving_boundary_indices
+                boundary_indices[t_idx] = phase_change_indices[0]
+            else:
+                boundary_indices[t_idx] = -1
+            print(f"Debug: Time step {t_idx} - phase_change_indices: {phase_change_indices}")
+            print(f"Debug: Time step {t_idx} - boundary_indices: {boundary_indices[t_idx]}")
+        return boundary_indices
 
     def heat_source_function(self, t, cycle_duration, heat_source_max):
         half_cycle = cycle_duration / 2
@@ -186,14 +230,6 @@ class PCM(ABC):
             return heat_source_max
         else:
             return 0
-
-    @abstractmethod
-    def implicitSol(self, x_arr, tmax, cls, phase_mask_array=None, boundary_mask_array=None):
-        pass
-
-    @abstractmethod
-    def explicitNumerical(self, x_arr, tmax, cls, phase_mask_array=None, boundary_mask_array=None):
-        pass
 
     def inverseEnthalpy2(self, H, cls):
         T = np.full_like(H, cls.T_m)
@@ -224,6 +260,8 @@ class PCM(ABC):
             cls.LH + cls.rho * cls.c * (T - cls.T_m)
         ]
         H = np.select(conditions, choices, default=cls.LH)
+        print(f"Debug: T: {T}")
+        print(f"Debug: H: {H}")
         return H
 
     def calcEnthalpy(self, x_arr, t_max, cls):
@@ -283,33 +321,26 @@ class PCM(ABC):
         else:
             return "The thermal energy in the regolith is not sufficient to power the settlement."
 
-    def analyticalSol(self, x_val, t_arr, cls, phase_mask_array=None, bound_mask_array=None):
+    def analyticalSol(self, x_val, t_arr, cls):
         T_initial = cls.T_a
         T_final = cls.T_m
-        # Initialize the temperature array with the initial temperature
         T = np.full((len(x_val), len(t_arr)), T_initial, dtype=np.float64)
-
-        # Directly applying boundary condition at the first spatial point for all time steps
         T[0, :] = T_final
 
         for t_idx, t_val in enumerate(t_arr):
-            # Ensure t_val is not zero to avoid division by zero
             if t_val > 0:
                 alpha2 = self.alpha(cls.k, cls.c, cls.rho)
-                # Utilize broadcasting to simplify the computation
                 x_term = x_val / (2 * np.sqrt(alpha2 * t_val))
                 T[:, t_idx] = T_initial + (T_final - T_initial) * (1 - erf(x_term))
             else:
-                # Handle the case where t_val is 0 (initial condition)
                 T[:, t_idx] = T_initial
 
-            # Compute or update the mask arrays at each time step to reflect current conditions
-            if phase_mask_array is None or bound_mask_array is None:
-                phase_mask_array, bound_mask_array = compute_mask_arrays(T[:, t_idx], cls, tolerance=100)
-
-            # Optionally, apply additional logic here using the updated masks
-
-        return T, phase_mask_array, bound_mask_array
+            # Debug print for temperature profile at specific time steps
+            # if t_idx % 10 == 0:  # Print every 10 time steps
+        #         print(f"Debug: Time step {t_idx}, T[:, {t_idx}]: {T[:, t_idx]}")
+        #
+        # print(f"Debug: analyticalSol - T shape: {T.shape}")
+        return T
 
 
 class customPCM(PCM):
@@ -555,8 +586,11 @@ class Iron(PCM):
         self.lmbda = self.dt / (self.dx ** 2)  # Used for numerical methods
 
     def generate_data(self, x_max, t_max):
+        self.x_max = x_max  # Save x_max as an instance attribute
         x_grid = np.arange(0, x_max, self.dx)
-        t_grid = np.arange(self.dt, t_max, self.dt)
+        t_grid = np.arange(self.dt, t_max, self.dt)  # Exclude the final time step
+        print(f"Debug from generate_data: x_grid shape = {x_grid.shape}")
+        print(f"Debug from generate_data: t_grid shape = {t_grid.shape}")
 
         X, T = np.meshgrid(x_grid, t_grid, indexing='ij')
         x_features = np.column_stack([X.ravel(), T.ravel()])
@@ -568,7 +602,13 @@ class Iron(PCM):
         y_B = y_T.copy()
         x_boundary = x_features.copy()
 
-        return x_features, y_T, y_B, x_boundary, x_grid, t_grid
+        T_arr = np.full((len(x_grid), len(t_grid)), self.T_a)
+        H_arr = self.initial_enthalpy(x_grid, self, len(t_grid))
+
+        print(f"Debug: x_features shape = {x_features.shape}")
+        print(f"Debug: y_T shape = {y_T.shape}, y_B shape = {y_B.shape}")
+
+        return x_features, y_T, y_B, x_boundary, x_grid, t_grid, T_arr, H_arr
 
     # def generate_data(self, x_max, t_max):
     #     x_grid = np.arange(0, x_max, self.dx)
@@ -595,104 +635,101 @@ class Iron(PCM):
     #
     #     return x_features, y_T, y_B, x_boundary, x_grid, t_grid
 
-    def explicitNumerical(self, x_arr, tmax, cls, phase_mask_array=None, boundary_mask_array=None):
+    def explicitNumerical(self, x_arr, t_arr, T_arr, cls, phase_mask_array=None, boundary_mask_array=None):
         nx = len(x_arr)
-        num_timesteps = int(tmax / self.dt) # Calculate the number of timesteps
-        T_arr = np.full((nx, num_timesteps), self.T_a, dtype=np.float64)  # Initialize temperature array
-        T_arr[0, 0] = self.T_m + 10.0  # Apply the left boundary condition for the initial timestep
+        num_timesteps = len(t_arr)
 
-        if phase_mask_array is None:
+        if phase_mask_array is None or boundary_mask_array is None:
             phase_mask_array = np.zeros((nx, num_timesteps), dtype=int)
-        if boundary_mask_array is None:
             boundary_mask_array = np.zeros((nx, num_timesteps), dtype=int)
 
-        alpha = cls.alpha(self.k, self.c, self.rho)  # Thermal diffusivity using the alpha method
-        time_elapsed = 0.0
-        t_arr = [time_elapsed]  # Start tracking time steps from 0
+        alpha = cls.alpha(cls.k, cls.c, cls.rho)
+        moving_boundary_indices = None
 
-        timestep = 0
-        while time_elapsed < tmax and timestep < num_timesteps - 1:
-            T_old = T_arr[:, timestep]
-            dt = min(self.dt, (0.5 * self.dx ** 2) / alpha)  # Calculate safe time step
-
-            if time_elapsed + dt > tmax:
-                dt = tmax - time_elapsed  # Adjust dt to not overshoot tmax
-
-            # Calculate the diffusive term using FTCS
+        for timestep in range(1, num_timesteps):
+            T_old = T_arr[:, timestep - 1]
             diffusive_term = (np.roll(T_old, -1) - 2 * T_old + np.roll(T_old, 1))
-            T_new = T_old + (alpha * dt / self.dx ** 2) * diffusive_term
+            T_new = T_old + (alpha * cls.dt / cls.dx ** 2) * diffusive_term
 
-            # Apply boundary conditions
-            T_new[0] = self.T_m + 10.0  # Left boundary condition
-            T_new[-1] = T_old[-1]  # Right boundary condition (can be adjusted as needed)
+            T_new[0] = cls.T_m + 10.0
+            T_new[-1] = T_old[-1]
 
-            timestep += 1
-            if timestep < num_timesteps:  # Ensure the timestep does not exceed the array size
-                T_arr[:, timestep] = T_new  # Append new temperatures
-                phase_mask_array[:, timestep] = cls.update_phase_mask(T_new, cls)
-                boundary_mask_array[:, timestep] = cls.update_phase_mask(T_new, cls)
+            T_arr[:, timestep] = T_new
+            phase_mask_array[:, timestep], boundary_mask_array[:, timestep] = compute_mask_arrays(T_new, cls)
 
-            time_elapsed += dt
-            t_arr.append(time_elapsed)  # Track each time step used
+        if moving_boundary_indices is None:
+            x_features = np.column_stack([np.tile(x_arr, len(t_arr)), np.repeat(t_arr, len(x_arr))])
+            moving_boundary_indices = self.calculate_boundary_indices(x_features, x_arr[-1], cls.dt, T=T_arr,
+                                                                      T_m=cls.T_m, mode='moving_boundary')
 
-        return T_arr, phase_mask_array.flatten(), boundary_mask_array.flatten(), np.array(t_arr)
+        return T_arr, phase_mask_array, boundary_mask_array, moving_boundary_indices
 
-    def implicitSol(self, x_arr, tmax, cls, phase_mask_array=None, boundary_mask_array=None):
+    def implicitSol(self, x_arr, t_arr, T_arr, H_arr, cls, phase_mask_array=None, boundary_mask_array=None):
         num_segments = len(x_arr)
-        t_arr = [cls.dt]
-        T_arr = np.full((num_segments, 1), cls.T_a)
-        H_arr = np.ones((num_segments, 1)) * cls.calcEnthalpy2(T_arr[:, 0], cls)
+        num_timesteps = len(t_arr)
 
         if phase_mask_array is None:
-            phase_mask_array = np.zeros((num_segments, 1), dtype=int)
+            phase_mask_array = np.zeros((num_segments, num_timesteps), dtype=int)
         if boundary_mask_array is None:
-            boundary_mask_array = np.zeros((num_segments, 1), dtype=int)
+            boundary_mask_array = np.zeros((num_segments, num_timesteps), dtype=int)
 
-        t = cls.dt
-        while t < tmax:
-            T_old = T_arr[:, -1]
-            H_old = H_arr[:, -1]
-            A = np.zeros((num_segments, num_segments))
-            b = np.zeros(num_segments)
+        moving_boundary_indices = np.full(num_timesteps, -1, dtype=int)
+        for time_step in range(1, num_timesteps):
+            T_old = T_arr[:, time_step - 1]
+            H_old = H_arr[:, time_step - 1]
 
-            for i in range(1, num_segments - 1):
-                k = cls.calcThermalConductivity(T_old[i])
-                c = cls.calcSpecificHeat(T_old[i])
-                rho = cls.rho
-                alpha = k / (c * rho)
-                lmbda = cls.dt / cls.dx ** 2 * alpha
+            k_vals = np.array([cls.calcThermalConductivity(T_old[i]) for i in range(num_segments)])
+            c_vals = np.array([cls.calcSpecificHeat(T_old[i]) for i in range(num_segments)])
+            rho = cls.rho
+            alpha_vals = k_vals / (c_vals * rho)
+            lmbda_vals = cls.dt / cls.dx ** 2 * alpha_vals
 
-                A[i, i - 1] = -lmbda
-                A[i, i] = 1 + 2 * lmbda
-                A[i, i + 1] = -lmbda
-                b[i] = T_old[i]
+            diagonals = [
+                -lmbda_vals[1:],
+                1 + 2 * lmbda_vals,
+                -lmbda_vals[:-1]
+            ]
+            A = diags(diagonals, [-1, 0, 1], shape=(num_segments, num_segments)).toarray()
+            b = T_old.copy()
 
+            # Apply boundary conditions
+            A[0, :] = 0
             A[0, 0] = 1
-            b[0] = cls.T_m
+            b[0] = cls.T_m + 10  # Temperature slightly above T_m at the first cell
+            A[-1, :] = 0
             A[-1, -1] = 1
-            A[-1, -2] = -1
-            b[-1] = 0
+            b[-1] = cls.T_a  # Ambient temperature T_a everywhere else
 
             try:
-                lu, piv = lu_factor(A)
-                T_new = lu_solve((lu, piv), b)
+                lu = splu(A)
+                T_new = lu.solve(b)
+
+                print(f"Debug: Time step {time_step} - T_new: {T_new}")
 
                 H_new = cls.calcEnthalpy2(T_new, cls)
-                T_arr = np.hstack((T_arr, T_new[:, np.newaxis]))
-                H_arr = np.hstack((H_arr, H_new[:, np.newaxis]))
+                T_arr[:, time_step] = T_new
+                H_arr[:, time_step] = H_new
 
-                mask_new = np.where(T_new < cls.T_m, 0, np.where(T_new > cls.T_m, 1, 2))
-                if phase_mask_array.ndim == 1:
-                    phase_mask_array = phase_mask_array.reshape(-1, 1)
-                phase_mask_array = np.hstack((phase_mask_array, mask_new[:, np.newaxis]))
+                # Use compute_mask_arrays to compute masks
+                phase_mask, boundary_mask = compute_mask_arrays(T_new, cls)
+                phase_mask_array[:, time_step] = phase_mask
+                boundary_mask_array[:, time_step] = boundary_mask
 
-                t += cls.dt
-                t_arr.append(t)
+                print(f"Debug: Time step {time_step} - mask_new: {phase_mask}")
+                print(f"Debug: Time step {time_step} - boundary_mask_new: {boundary_mask}")
+
+                moving_boundary_indices[time_step] = self.calculate_boundary_indices(
+                    x_arr, self.x_max, cls.dt, T=T_arr, T_m=cls.T_m, mode='moving_boundary', tolerance=100
+                )[time_step]
             except Exception as e:
                 print(f"An error occurred: {e}")
                 break
 
-        return T_arr, H_arr, np.array(t_arr), phase_mask_array, boundary_mask_array
+        print(f"Debug: Final phase_mask_array: {phase_mask_array}")
+        print(f"Debug: Final boundary_mask_array: {boundary_mask_array}")
+        print(f"Debug: Final moving_boundary_indices: {moving_boundary_indices}")
+
+        return T_arr, H_arr, phase_mask_array, boundary_mask_array, moving_boundary_indices
 
     def calcThermalConductivity(self, temp):
         """Calculate the thermal conductivity of iron based on its phase (solid or liquid).

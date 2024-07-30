@@ -1,16 +1,17 @@
 import numpy as np
 import tensorflow as tf
-from keras.regularizers import l2
+from tensorflow.keras.regularizers import l2
 from tensorflow.keras.layers import Dense, Dropout, BatchNormalization, PReLU
 from matplotlib import pyplot as plt
-from keras import Model
-from keras.losses import Loss
-from keras.optimizers import Adam
+from tensorflow.keras import Model
+from tensorflow.keras.losses import Loss
+from tensorflow.keras.optimizers import Adam
 from sklearn.preprocessing import MinMaxScaler
 from tqdm import tqdm
-from keras.optimizers.schedules import ExponentialDecay
+from tensorflow.keras.optimizers.schedules import ExponentialDecay
 
-# tf.config.run_functions_eagerly(True)
+tf.config.run_functions_eagerly(True)
+
 
 def scaled_sigmoid(T_a, T_m, offset=256):
     def activation(x):
@@ -19,14 +20,17 @@ def scaled_sigmoid(T_a, T_m, offset=256):
     return activation
 
 
-def custom_accuracy(y_true, y_pred, scale_factor=1.0):
-    accuracy = 1.0 - tf.reduce_mean(tf.abs((y_true - y_pred) / (y_true + 1e-8)))
-    return accuracy * scale_factor  # Apply scaling
+def custom_accuracy(y_true, y_pred):
+    y_true = tf.cast(y_true, tf.float32)
+    y_pred = tf.cast(y_pred, tf.float32)
+    accuracy = tf.reduce_mean(tf.abs(y_true - y_pred))
+    return accuracy
 
 
-class CustomPINNModel(Model):
-    def __init__(self, input_dim, output_dim, alpha, T_m, T_a, boundary_indices, x_arr, t_arr, pcm, x_input, batch_size=64,
-                 bound_mask_array=None, temp_mask_array=None,
+
+class CustomPINNModel(tf.keras.Model):
+    def __init__(self, input_dim, output_dim, alpha, T_m, T_a, boundary_indices, x_arr, t_arr, pcm, x_input,
+                 batch_size=64, bound_mask_array=None, temp_mask_array=None,
                  initial_data=None, initial_data_T=None, initial_data_B=None,
                  y=None, y_T=None, y_B=None, moving_boundary_locations=None, x_max=1.0, gold_standard=None, **kwargs):
 
@@ -35,21 +39,19 @@ class CustomPINNModel(Model):
         self.x = x_input
         self.pcm = pcm
         self.batch_size = batch_size
-        self.bound_mask_array = tf.convert_to_tensor(bound_mask_array, dtype=tf.float64)
-        self.temp_mask_array = tf.convert_to_tensor(temp_mask_array, dtype=tf.float64)
+        self.bound_mask_array = tf.convert_to_tensor(bound_mask_array, dtype=tf.float32)
+        self.temp_mask_array = tf.convert_to_tensor(temp_mask_array, dtype=tf.float32)
         self.ema_accuracy_T, self.ema_accuracy_B = None, None
-        self.min_total_loss = tf.Variable(float('inf'), trainable=False, dtype=tf.float64)
-        self.max_total_loss = tf.Variable(float('-inf'), trainable=False, dtype=tf.float64)
-        self.min_total_accuracy_T = tf.Variable(float('inf'), trainable=False, dtype=tf.float64)
-        self.max_total_accuracy_T = tf.Variable(float('-inf'), trainable=False, dtype=tf.float64)
-        self.min_total_accuracy_B = tf.Variable(float('inf'), trainable=False, dtype=tf.float64)
-        self.max_total_accuracy_B = tf.Variable(float('-inf'), trainable=False, dtype=tf.float64)
-        # Loss scaling factors
-        self.scale_mse_T = 1.0  # Scale for temperature MSE loss
-        self.scale_mse_B = 1.0  # Scale for boundary MSE loss
-        self.scale_physics = 1.0  # Scale for physics-based residual loss
-
-        lr_schedule = ExponentialDecay(initial_learning_rate=1e-2, decay_steps=10000, decay_rate=0.9)
+        self.min_total_loss = tf.Variable(tf.float32.max, trainable=False)
+        self.max_total_loss = tf.Variable(tf.float32.min, trainable=False)
+        self.min_total_accuracy_T = tf.Variable(tf.float32.max, trainable=False)
+        self.max_total_accuracy_T = tf.Variable(tf.float32.min, trainable=False)
+        self.min_total_accuracy_B = tf.Variable(tf.float32.max, trainable=False)
+        self.max_total_accuracy_B = tf.Variable(tf.float32.min, trainable=False)
+        self.scale_mse_T = 1.0
+        self.scale_mse_B = 1.0
+        self.scale_physics = 1.0
+        lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(initial_learning_rate=1e-2, decay_steps=10000, decay_rate=0.9)
         self.x_arr = x_arr
         self.t_arr = t_arr
         self.nx = len(self.x_arr)
@@ -58,48 +60,38 @@ class CustomPINNModel(Model):
         self.reg_lambda = 0.01
         self.lambda_1 = 1.0
         self.lambda_2 = 1.0
-        he_initializer = tf.keras.initializers.HeNormal(seed=42)  # For ReLU activations
-        glorot_initializer = tf.keras.initializers.GlorotNormal()  # For tanh or sigmoid activations
+        he_initializer = tf.keras.initializers.HeNormal(seed=42)
+        glorot_initializer = tf.keras.initializers.GlorotNormal()
+        self.optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001, clipvalue=1.0)
 
-        self.optimizer = Adam(learning_rate=0.0001, clipvalue=1.0)  # Added gradient clipping
-
-        # Temperature Subnetwork with PReLU activation
         self.temperature_subnetwork = [
-            Dense(64, kernel_initializer=he_initializer, kernel_regularizer=l2(self.reg_lambda))
-            for i in range(3)]
-        self.temperature_subnetwork.extend([PReLU() for i in range(3)])  # adding PReLU after each Dense layer
-        self.temperature_subnetwork.append(Dropout(0.3))
+            tf.keras.layers.Dense(64, kernel_initializer=he_initializer, kernel_regularizer=tf.keras.regularizers.l2(self.reg_lambda)) for i in range(3)]
+        self.temperature_subnetwork.extend([tf.keras.layers.PReLU() for i in range(3)])
+        self.temperature_subnetwork.append(tf.keras.layers.Dropout(0.3))
 
-        # Boundary Subnetwork with Swish activation
         self.boundary_subnetwork = [
-            Dense(32, kernel_initializer=he_initializer, activation='swish', kernel_regularizer=l2(self.reg_lambda)) for
-            i in range(2)]
-        self.boundary_subnetwork.append(Dropout(0.3))
+            tf.keras.layers.Dense(32, kernel_initializer=he_initializer, activation='swish', kernel_regularizer=tf.keras.regularizers.l2(self.reg_lambda)) for i in range(2)]
+        self.boundary_subnetwork.append(tf.keras.layers.Dropout(0.3))
 
-        # Batch Normalization Layers
-        self.batch_norm_layers = [BatchNormalization() for i in range(5)]
+        self.batch_norm_layers = [tf.keras.layers.BatchNormalization() for i in range(5)]
 
-        # Shared Layers with PReLU activation
-        self.dense_layers = [Dense(128, kernel_initializer=he_initializer, kernel_regularizer=l2(self.reg_lambda)) for i
-                             in range(3)]
-        self.dense_layers.extend([PReLU() for i in range(3)])  # adding PReLU after each Dense layer
-        self.dense_layers.append(Dropout(0.3))
+        self.dense_layers = [tf.keras.layers.Dense(128, kernel_initializer=he_initializer, kernel_regularizer=tf.keras.regularizers.l2(self.reg_lambda)) for i in range(3)]
+        self.dense_layers.extend([tf.keras.layers.PReLU() for i in range(3)])
+        self.dense_layers.append(tf.keras.layers.Dropout(0.3))
 
-        # Output Layers
-        self.output_layer_temperature = Dense(output_dim, kernel_initializer=glorot_initializer,
-                                              activation=scaled_sigmoid(T_a, T_m))
-        self.output_layer_boundary = Dense(1, kernel_initializer=glorot_initializer,
-                                           activation='softplus')
+        self.output_layer_temperature = tf.keras.layers.Dense(output_dim, kernel_initializer=glorot_initializer,
+                                                              activation=scaled_sigmoid(T_a, T_m))
+        self.output_layer_boundary = tf.keras.layers.Dense(1, kernel_initializer=glorot_initializer, activation='softplus')
 
-        # Additional attributes for normalization and tracking
         self.alpha = alpha
         self.T_m = T_m
         self.T_a = T_a
-        # Initialize new attributes for y_T and y_B
         self.y_T = y_T
         self.y_B = y_B
         self.boundary_indices = boundary_indices
         self.total_loss = None
+        self.moving_boundary_locations = moving_boundary_locations
+
         if initial_data is not None:
             x_initial, _ = initial_data
             self.x_mean = np.mean(x_initial, axis=0)
@@ -108,9 +100,8 @@ class CustomPINNModel(Model):
             self.x_mean = 0.0
             self.x_std = 1.0
 
-        # Initialize attributes for Z-score normalization of the total loss
-        self.sum_total_loss = tf.Variable(0.0, trainable=False, dtype=tf.float64)
-        self.sum_squared_total_loss = tf.Variable(0.0, trainable=False, dtype=tf.float64)
+        self.sum_total_loss = tf.Variable(0.0, trainable=False, dtype=tf.float32)
+        self.sum_squared_total_loss = tf.Variable(0.0, trainable=False, dtype=tf.float32)
         self.num_steps = tf.Variable(0, trainable=False)
         self.ema_loss = None
 
@@ -118,16 +109,12 @@ class CustomPINNModel(Model):
             if self.y_T is not None:
                 self.y_T_mean = np.mean(self.y_T)
                 self.y_T_std = np.std(self.y_T)
-
             if self.y_B is not None:
                 self.y_B_mean = np.mean(self.y_B)
                 self.y_B_std = np.std(self.y_B)
-
             print("Debug: y_B shape =", self.y_B.shape)
             print(f"Is output_layer_boundary trainable? {self.output_layer_boundary.trainable}")
             print("Initial weights of output_layer_boundary:", self.output_layer_boundary.get_weights())
-
-            # Initialize new attributes
             self.initial_data_T = initial_data_T
             self.initial_data_B = initial_data_B
             if initial_data_T is not None:
@@ -137,7 +124,6 @@ class CustomPINNModel(Model):
             else:
                 self.x_mean_T = 0.0
                 self.x_std_T = 1.0
-
             if initial_data_B is not None:
                 x_initial_B, _ = initial_data_B
                 self.x_mean_B = np.mean(x_initial_B, axis=0)
@@ -145,6 +131,24 @@ class CustomPINNModel(Model):
             else:
                 self.x_mean_B = 0.0
                 self.x_std_B = 1.0
+
+
+    def build(self, input_shape):
+        # Build the temperature subnetwork layers
+        for layer in self.temperature_subnetwork:
+            if isinstance(layer, tf.keras.layers.Dense) or isinstance(layer, tf.keras.layers.PReLU):
+                layer.build(input_shape['temperature_input'])
+                input_shape['temperature_input'] = layer.compute_output_shape(input_shape['temperature_input'])
+
+        # Build the boundary subnetwork layers
+        for layer in self.boundary_subnetwork:
+            if isinstance(layer, tf.keras.layers.Dense):
+                layer.build(input_shape['boundary_input'])
+                input_shape['boundary_input'] = layer.compute_output_shape(input_shape['boundary_input'])
+
+        # Build the output layers using the final shape from the respective subnetworks
+        self.output_layer_temperature.build(input_shape['temperature_input'])
+        self.output_layer_boundary.build(input_shape['boundary_input'])
 
 
     def update_loss_scales(self, new_scale_mse_T, new_scale_mse_B, new_scale_physics):
@@ -172,6 +176,49 @@ class CustomPINNModel(Model):
                 mask_moving_boundary[boundary_index, idx] = True
 
         return mask_initial_condition1, mask_initial_condition2, mask_moving_boundary
+
+    @tf.function
+    def calculate_physics_loss(self, temperature_inputs, y_pred_T):
+        x_inputs = temperature_inputs[:, 0]
+        t_inputs = temperature_inputs[:, 1]
+
+        tf.print("Debug at calculate physics loss: temperature_inputs:", temperature_inputs)
+        tf.print("Debug at calculate physics loss: x_inputs:", x_inputs)
+        tf.print("Debug at calculate physics loss: t_inputs:", t_inputs)
+        tf.print("Debug at calculate physics loss: y_pred_T:", y_pred_T)
+
+        with tf.GradientTape(persistent=True) as tape:
+            tape.watch(x_inputs)
+            tape.watch(t_inputs)
+
+            x_inputs = tf.convert_to_tensor(x_inputs, dtype=tf.float32)  # Ensure type is float32
+            t_inputs = tf.convert_to_tensor(t_inputs, dtype=tf.float32)  # Ensure type is float32
+            u_pred = tf.convert_to_tensor(y_pred_T, dtype=tf.float32)  # Ensure type is float32
+
+            tf.print("Debug at calculate physics loss (inside tape): u_pred:", u_pred)
+            tf.print("Debug at calculate physics loss (inside tape): x_inputs:", x_inputs)
+            tf.print("Debug at calculate physics loss (inside tape): t_inputs:", t_inputs)
+
+            u_x = tape.gradient(u_pred, x_inputs)
+            u_t = tape.gradient(u_pred, t_inputs)
+
+            if u_x is None or u_t is None:
+                raise ValueError("u_x or u_t is None. Ensure x_inputs and t_inputs are correctly watched.")
+
+            u_xx = tape.gradient(u_x, x_inputs)
+
+        del tape
+
+        tf.print("Debug at calculate physics loss: u_x:", u_x)
+        tf.print("Debug at calculate physics loss: u_t:", u_t)
+        tf.print("Debug at calculate physics loss: u_xx:", u_xx)
+
+        # Introduce a heat source term with increased intensity
+        heat_source = 100.0  # Increased value of the heat source
+        heat_equation_loss = tf.square(u_t - self.alpha * u_xx + heat_source)
+        physics_loss = tf.reduce_mean(heat_equation_loss)
+
+        return physics_loss
 
     # def is_boundary_func(self, temp_input, boundary_input, temp_mask_array, bound_mask_array):
     #     print(f"temp_input shape before reshaping: {temp_input.shape}")  # Debug print
@@ -216,177 +263,144 @@ class CustomPINNModel(Model):
     #
     #     return is_temp_boundary, is_phase_boundary
 
-    def stefan_loss_wrapper(self, x, y_T, y_B, T_arr_implicit, pcm, mask_T, mask_B):
+    def stefan_loss_wrapper(self, x, y_T, y_B, T_arr, pcm, mask_T, mask_B):
         def loss(y_true, y_pred):
-            # Assuming you've updated is_boundary_func to correctly utilize the model's attributes
-            mask_initial_condition1, mask_initial_condition2, mask_moving_boundary = self.is_boundary_func()
+            mse_loss_T = tf.reduce_mean(tf.square(y_true['temperature_output'] - y_pred['temperature_output']))
+            mse_loss_B = tf.reduce_mean(tf.square(y_true['boundary_output'] - y_pred['boundary_output']))
+            physics_loss = self.calculate_physics_loss(x, y_pred['temperature_output'])
 
-            # Combine or selectively apply masks as needed
-            # Example: Combine all masks into one for simplification
-            combined_mask = mask_initial_condition1 | mask_initial_condition2 | mask_moving_boundary
+            total_loss = self.scale_physics * physics_loss + self.scale_mse_T * mse_loss_T + self.scale_mse_B * mse_loss_B
 
-            with tf.GradientTape(persistent=True) as tape:
-                tape.watch(x)
-                u_nn = y_pred['temperature']
-                u_t = tape.gradient(u_nn, x[:, 1])
-                u_x = tape.gradient(u_nn, x[:, 0])
-                u_xx = tape.gradient(u_x, x[:, 0])
+            # Update min/max losses and accuracies
+            self.update_min_max('total_loss', total_loss)
+            self.update_min_max('total_accuracy_T', mse_loss_T)
+            self.update_min_max('total_accuracy_B', mse_loss_B)
 
-            # Physics-based residual loss
-            residual = u_t - pcm.alpha * u_xx
-            L_r = tf.reduce_mean(tf.square(residual))
-
-            # Apply the combined mask for temperature MSE loss, if boundaries are treated similarly
-            mse_loss_T = tf.reduce_mean(tf.square(y_T - u_nn) * tf.cast(combined_mask, tf.float32))
-
-            # For boundary MSE loss, if separate treatment is needed, apply the specific mask
-            # Example: Using mask_initial_condition1 for demonstration
-            mse_loss_B = tf.reduce_mean(
-                tf.square(y_B - y_pred['boundary']) * tf.cast(mask_initial_condition1, tf.float32))
-
-            # Combined Loss
-            final_loss = L_r + mse_loss_T + mse_loss_B
-
-            return final_loss
+            return total_loss
 
         return loss
 
-    def call(self, inputs, training=False, **kwargs):
-        print("input values = ", inputs)
-        # Ensure the input keys exist
-        if 'temperature_input' not in inputs or 'boundary_input' not in inputs:
-            raise KeyError("Expected keys 'temperature_input' and 'boundary_input' not found in inputs")
+    @tf.function
+    def call(self, inputs, training=False):
+        temp_input = inputs['temperature_input']
+        bound_input = inputs['boundary_input']
 
-        # Extract temperature and boundary inputs directly
-        temperature_input = inputs['temperature_input']  # Directly access the temperature input
-        boundary_input = inputs['boundary_input']  # Directly access the boundary input
-
-        # Temperature Subnetwork
-        x_T = temperature_input
+        x = temp_input
         for layer in self.temperature_subnetwork:
-            x_T = layer(x_T)
-        output_T = self.output_layer_temperature(x_T)
+            x = layer(x, training=training)
 
-        # Boundary Subnetwork
-        x_B = boundary_input
+        temp_output = self.output_layer_temperature(x)
+
+        y = bound_input
         for layer in self.boundary_subnetwork:
-            x_B = layer(x_B)
-        output_B = self.output_layer_boundary(x_B)
+            y = layer(y, training=training)
 
-        return {'temperature': output_T, 'boundary': output_B}
+        bound_output = self.output_layer_boundary(y)
 
-    def compute_loss(self, targets, y_pred, inputs):
-        y_true_T = tf.cast(targets['temperature_output'], tf.float64)
-        y_true_B = tf.cast(targets['boundary_output'], tf.float64)
+        return {'temperature_output': temp_output, 'boundary_output': bound_output}
 
-        y_pred_T = tf.cast(y_pred['temperature'], tf.float64)
-        y_pred_B = tf.cast(y_pred['boundary'], tf.float64)
+    @tf.function
+    def compute_loss(self, y_true, y_pred, x_inputs):
+        y_true_T = y_true['temperature_output']
+        y_true_B = y_true['boundary_output']
+        y_pred_T = y_pred['temperature_output']
+        y_pred_B = y_pred['boundary_output']
 
         batch_size = tf.shape(y_true_T)[0]
+        is_temp_boundary = self.temp_mask_array[:batch_size]
+        is_phase_boundary = self.bound_mask_array[:batch_size]
 
-        # Reshape true and predicted values
-        y_true_T = tf.reshape(y_true_T, [batch_size, -1])
-        y_true_B = tf.reshape(y_true_B, [batch_size, -1])
-        y_pred_T = tf.reshape(y_pred_T, [batch_size, -1])
-        y_pred_B = tf.reshape(y_pred_B, [batch_size, -1])
+        tf.print("compute_loss - y_true_T shape:", tf.shape(y_true_T))
+        tf.print("compute_loss - y_true_B shape:", tf.shape(y_true_B))
+        tf.print("compute_loss - is_temp_boundary shape:", tf.shape(is_temp_boundary))
+        tf.print("compute_loss - is_phase_boundary shape:", tf.shape(is_phase_boundary))
 
-        temperature_inputs = inputs['temperature_input']
-        boundary_inputs = inputs['boundary_input']
+        # Reshape masks to match y_true shape
+        is_temp_boundary = tf.reshape(is_temp_boundary, [-1])
+        is_phase_boundary = tf.reshape(is_phase_boundary, [-1])
 
-        is_temp_boundary, is_phase_boundary, input_dim = self.branching_function(
-            temperature_inputs, boundary_inputs, self.temp_mask_array, self.bound_mask_array
-        )
+        tf.print("compute_loss - is_temp_boundary shape after reshaping:", tf.shape(is_temp_boundary))
+        tf.print("compute_loss - is_phase_boundary shape after reshaping:", tf.shape(is_phase_boundary))
 
-        is_temp_boundary_float = tf.cast(is_temp_boundary, tf.float64)
-        is_phase_boundary_float = tf.cast(is_phase_boundary, tf.float64)
+        # Apply the masks
+        y_true_T_masked = tf.boolean_mask(y_true_T, is_temp_boundary)
+        y_pred_T_masked = tf.boolean_mask(y_pred_T, is_temp_boundary)
+        y_true_B_masked = tf.boolean_mask(y_true_B, is_phase_boundary)
+        y_pred_B_masked = tf.boolean_mask(y_pred_B, is_phase_boundary)
 
-        # Debugging shapes
-        tf.print("Debug: Shapes in compute_loss function")
-        tf.print("y_true_T shape:", y_true_T.shape)
-        tf.print("y_pred_T shape:", y_pred_T.shape)
-        tf.print("is_temp_boundary_float shape:", is_temp_boundary_float.shape)
-        tf.print("y_true_B shape:", y_true_B.shape)
-        tf.print("y_pred_B shape:", y_pred_B.shape)
-        tf.print("is_phase_boundary_float shape:", is_phase_boundary_float.shape)
+        # Debug prints for masked values
+        tf.print("compute_loss - y_true_T_masked:", y_true_T_masked)
+        tf.print("compute_loss - y_pred_T_masked:", y_pred_T_masked)
+        tf.print("compute_loss - y_true_B_masked:", y_true_B_masked)
+        tf.print("compute_loss - y_pred_B_masked:", y_pred_B_masked)
 
-        tf.debugging.assert_shapes([
-            (y_true_T, ('batch', 1)),
-            (y_pred_T, ('batch', 1)),
-            (is_temp_boundary_float, ('batch',))
-        ], message="Shape mismatch in temperature loss calculation")
+        if tf.size(y_true_B_masked) == 0:
+            tf.print("Warning: y_true_B_masked is empty. Check phase boundary mask.")
 
-        tf.debugging.assert_shapes([
-            (y_true_B, ('batch', 1)),
-            (y_pred_B, ('batch', 1)),
-            (is_phase_boundary_float, ('batch',))
-        ], message="Shape mismatch in boundary loss calculation")
+        if tf.size(y_pred_B_masked) == 0:
+            tf.print("Warning: y_pred_B_masked is empty. Check phase boundary mask.")
 
-        mse_loss_T = tf.reduce_mean(tf.square(y_true_T - y_pred_T) * is_temp_boundary_float)
-        mse_loss_B = tf.reduce_mean(tf.square(y_true_B - y_pred_B) * is_phase_boundary_float)
+        mse_loss_T = tf.reduce_mean(tf.square(y_true_T_masked - y_pred_T_masked))
+        mse_loss_B = tf.constant(0.0, dtype=tf.float32) if tf.size(y_true_B_masked) == 0 or tf.size(
+            y_pred_B_masked) == 0 else tf.reduce_mean(tf.square(y_true_B_masked - y_pred_B_masked))
+        mse_loss = mse_loss_T + mse_loss_B
 
-        physics_loss = tf.constant(0.0, dtype=tf.float64)
-
-        total_loss = mse_loss_T + mse_loss_B + physics_loss
-
-        return total_loss, physics_loss, mse_loss_B
+        return mse_loss_T, mse_loss_B
 
     def update_min_max(self, attr_name, value):
         min_attr = f"min_{attr_name}"
         max_attr = f"max_{attr_name}"
 
-        if getattr(self, min_attr) is None:
-            setattr(self, min_attr, tf.Variable(value, trainable=False, dtype=tf.float64))
+        current_min = getattr(self, min_attr)
+        current_max = getattr(self, max_attr)
 
-        if getattr(self, max_attr) is None:
-            setattr(self, max_attr, tf.Variable(value, trainable=False, dtype=tf.float64))
+        new_min = tf.minimum(current_min, value)
+        new_max = tf.maximum(current_max, value)
 
-        getattr(self, min_attr).assign(tf.math.minimum(getattr(self, min_attr), value))
-        getattr(self, max_attr).assign(tf.math.maximum(getattr(self, max_attr), value))
+        setattr(self, min_attr, new_min)
+        setattr(self, max_attr, new_max)
 
+        # Print updated values for debugging
+        tf.print(f"Updated {min_attr}: {new_min}")
+        tf.print(f"Updated {max_attr}: {new_max}")
+
+    @tf.function
     def train_step(self, data):
-        # Ensure the data is in the correct format
-        if not isinstance(data, tuple) or len(data) < 2:
-            raise ValueError("Data should be a tuple of at least (inputs, targets)")
+        inputs, targets, sample_weights = data
 
-        inputs, targets = data[:2]  # Unpack only the first two elements
-
-        print("Inputs shape:", {k: v.shape for k, v in inputs.items()})
-        print("Targets shape:", {k: v.shape for k, v in targets.items()})
-
-        with tf.GradientTape(persistent=True) as tape:
+        with tf.GradientTape() as tape:
             y_pred = self(inputs, training=True)
-            # Debug prints for the predicted shapes
-            print("Predictions shape:", {k: v.shape for k, v in y_pred.items()})
+            mse_loss_T, mse_loss_B = self.compute_loss(targets, y_pred, inputs)
+            total_loss = mse_loss_T + mse_loss_B
 
-            # Compute losses
-            mse_loss, physics_loss, boundary_loss = self.compute_loss(targets, y_pred, inputs)
-            mse_loss = tf.reduce_mean(mse_loss)
-            physics_loss = tf.reduce_mean(physics_loss)
-            boundary_loss = tf.reduce_mean(boundary_loss)
-
-            # Calculate total loss
-            total_loss = mse_loss + self.lambda_1 * physics_loss + self.lambda_2 * boundary_loss
-
-        # Compute gradients and apply them
         grads = tape.gradient(total_loss, self.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
 
-        # Calculate scaled accuracies for monitoring
-        scaled_accuracy_T = custom_accuracy(targets['temperature_output'], y_pred['temperature'])
-        scaled_accuracy_B = custom_accuracy(targets['boundary_output'], y_pred['boundary'])
+        raw_accuracy_T = custom_accuracy(targets['temperature_output'], y_pred['temperature_output'])
+        raw_accuracy_B = custom_accuracy(targets['boundary_output'], y_pred['boundary_output'])
 
-        # Additional debug prints for accuracies
-        print("Scaled accuracy T:", scaled_accuracy_T)
-        print("Scaled accuracy B:", scaled_accuracy_B)
+        # Update min and max values for total loss and accuracies
+        self.update_min_max('total_loss', total_loss)
+        self.update_min_max('total_accuracy_T', raw_accuracy_T)
+        self.update_min_max('total_accuracy_B', raw_accuracy_B)
 
-        return {
-            "loss": total_loss,
-            "mse_loss": mse_loss,
-            "physics_loss": physics_loss,
-            "boundary_loss": boundary_loss,
-            "scaled_accuracy_T": scaled_accuracy_T,
-            "scaled_accuracy_B": scaled_accuracy_B
-        }
+        scaled_total_loss = self.scale_value(total_loss, self.min_total_loss, self.max_total_loss)
+        scaled_accuracy_T = self.scale_value(raw_accuracy_T, self.min_total_accuracy_T, self.max_total_accuracy_T)
+        scaled_accuracy_B = self.scale_value(raw_accuracy_B, self.min_total_accuracy_B, self.max_total_accuracy_B)
+
+        tf.print("train_step - scaled_total_loss:", scaled_total_loss)
+        tf.print("train_step - scaled_accuracy_T:", scaled_accuracy_T)
+        tf.print("train_step - scaled_accuracy_B:", scaled_accuracy_B)
+
+        return {"loss": scaled_total_loss, "scaled_accuracy_T": scaled_accuracy_T,
+                "scaled_accuracy_B": scaled_accuracy_B,
+                "raw_accuracy_T": raw_accuracy_T, "raw_accuracy_B": raw_accuracy_B}
+
+    def scale_value(self, value, min_value, max_value):
+        if tf.equal(min_value, max_value):
+            return tf.constant(0.0, dtype=tf.float32)
+        scaled_value = (value - min_value) / (max_value - min_value)
+        return tf.clip_by_value(scaled_value, 0.0, 1.0)  # Ensure scaled value is between 0 and 1
 
     def branching_function(self, temperature_inputs, boundary_inputs, temp_mask_array, bound_mask_array):
         batch_size = tf.shape(temperature_inputs)[0]
@@ -432,7 +446,6 @@ class CustomPINNModel(Model):
                                            bound_mask_tensor_flat[:tf.shape(is_boundary_flat_bool)[0]])
 
         return is_temp_boundary, is_phase_boundary, input_dim
-
 
 
 class MaskedCustomLoss(Loss):
@@ -725,28 +738,50 @@ class GradientMonitor(tf.keras.callbacks.Callback):
 
 
 def train_PINN(model, x, x_boundary, y_T, y_B, epochs, mask_T, mask_B, batch_size):
-    # Flatten the mask arrays just before training
-    mask_T_flat = mask_T.flatten()
-    mask_B_flat = mask_B.flatten()
+    x = x.astype(np.float32)
+    x_boundary = x_boundary.astype(np.float32)
+    y_T = y_T.astype(np.float32)
+    y_B = y_B.astype(np.float32)
+    mask_T = mask_T.astype(np.float32)
+    mask_B = mask_B.astype(np.float32)
 
-    # Debug: Print the shapes right before training
-    print("Shapes in train_PINN:")
-    print("x shape:", x.shape)
-    print("x_boundary shape:", x_boundary.shape)
-    print("y_T shape:", y_T.shape)
-    print("y_B shape:", y_B.shape)
-    print("mask_T_flat shape:", mask_T_flat.shape)
-    print("mask_B_flat shape:", mask_B_flat.shape)
-    print("Calculated batch size:", batch_size)
+    # Debugging prints
+    print(f"Debug: Initial x shape = {x.shape}")
+    print(f"Debug: Initial x_boundary shape = {x_boundary.shape}")
+    print(f"Debug: Initial y_T shape = {y_T.shape}")
+    print(f"Debug: Initial y_B shape = {y_B.shape}")
+    print(f"Debug: Initial mask_T shape = {mask_T.shape}")
+    print(f"Debug: Initial mask_B shape = {mask_B.shape}")
 
-    # Update the sample weights to use the flattened masks
+    assert not np.isnan(x).any(), "x contains NaN values"
+    assert not np.isnan(x_boundary).any(), "x_boundary contains NaN values"
+    assert not np.isnan(y_T).any(), "y_T contains NaN values"
+    assert not np.isnan(y_B).any(), "y_B contains NaN values"
+    assert not np.isnan(mask_T).any(), "mask_T contains NaN values"
+    assert not np.isnan(mask_B).any(), "mask_B contains NaN values"
+
+    min_length = min(x.shape[0], y_T.shape[0], y_B.shape[0])
+    x = x[:min_length]
+    x_boundary = x_boundary[:min_length]
+    y_T = y_T[:min_length]
+    y_B = y_B[:min_length]
+    mask_T = np.resize(mask_T, (min_length,))
+    mask_B = np.resize(mask_B, (min_length,))
+
+    # Debugging prints
+    print(f"Debug: Trimmed x shape = {x.shape}")
+    print(f"Debug: Trimmed x_boundary shape = {x_boundary.shape}")
+    print(f"Debug: Trimmed y_T shape = {y_T.shape}")
+    print(f"Debug: Trimmed y_B shape = {y_B.shape}")
+    print(f"Debug: Trimmed mask_T shape = {mask_T.shape}")
+    print(f"Debug: Trimmed mask_B shape = {mask_B.shape}")
+
     sample_weights = {
-        'temperature_output': mask_T_flat,
-        'boundary_output': mask_B_flat
+        'temperature_output': mask_T,
+        'boundary_output': mask_B
     }
 
-    # Prepare data and targets for the model
-    data = {
+    inputs = {
         'temperature_input': x,
         'boundary_input': x_boundary
     }
@@ -756,35 +791,71 @@ def train_PINN(model, x, x_boundary, y_T, y_B, epochs, mask_T, mask_B, batch_siz
         'boundary_output': y_B
     }
 
-    # Compile the model with the custom loss and metrics
-    loss_fn = model.stefan_loss_wrapper(x, y_T, y_B, model.T_arr, model.pcm, mask_T, mask_B)
-    model.compile(optimizer=model.optimizer,
-                  loss=loss_fn,
-                  metrics={'temperature_output': custom_accuracy, 'boundary_output': custom_accuracy})
+    # Use the stefan_loss_wrapper to compile the model
+    loss_fn = model.stefan_loss_wrapper(
+        x=inputs,
+        y_T=targets['temperature_output'],
+        y_B=targets['boundary_output'],
+        T_arr=model.T_arr,
+        pcm=model.pcm,
+        mask_T=mask_T,
+        mask_B=mask_B
+    )
 
-    # Fit the model with the specified batch size
-    try:
-        # Fit the model with data and targets
-        history = model.fit(x=data, y=targets, epochs=epochs, sample_weight=sample_weights, batch_size=model.batch_size,
-                            verbose=1)
-        print("Available keys in history:", history.history.keys())
+    model.compile(
+        optimizer=model.optimizer,
+        loss=loss_fn,
+        metrics={'temperature_output': custom_accuracy, 'boundary_output': custom_accuracy}
+    )
 
-        # Post-training operations: Extract and process the history and model outputs
-        loss_values = history.history['loss']
-        accuracy_values_T = history.history.get('temperature_output_custom_accuracy', [])
-        accuracy_values_B = history.history.get('boundary_output_custom_accuracy', [])
+    # Explicitly build the model after compiling
+    model.build(input_shape={'temperature_input': x.shape, 'boundary_input': x_boundary.shape})
 
-        # Get predictions from the model
-        model_output = model.predict(data)
-        Temperature_pred = model_output['temperature']
-        Boundary_pred = model_output['boundary']
+    history = model.fit(x=inputs, y=targets, sample_weight=sample_weights, epochs=epochs, batch_size=batch_size)
 
-        return loss_values, {'accuracy_T': accuracy_values_T,
-                             'accuracy_B': accuracy_values_B}, Temperature_pred, Boundary_pred
+    loss_values = history.history.get('loss', [])
+    raw_accuracy_values_T = history.history.get('temperature_output_custom_accuracy', [])
+    raw_accuracy_values_B = history.history.get('boundary_output_custom_accuracy', [])
 
-    except Exception as e:
-        print("An error occurred during training: ", e)
-        return None, None, None, None
+    # Update min and max values for scaling
+    if loss_values:
+        model.update_min_max('total_loss', tf.reduce_min(loss_values))
+        model.update_min_max('total_loss', tf.reduce_max(loss_values))
+
+    if raw_accuracy_values_T:
+        model.update_min_max('total_accuracy_T', tf.reduce_min(raw_accuracy_values_T))
+        model.update_min_max('total_accuracy_T', tf.reduce_max(raw_accuracy_values_T))
+
+    if raw_accuracy_values_B:
+        model.update_min_max('total_accuracy_B', tf.reduce_min(raw_accuracy_values_B))
+        model.update_min_max('total_accuracy_B', tf.reduce_max(raw_accuracy_values_B))
+
+    scaled_loss_values = [model.scale_value(loss, model.min_total_loss, model.max_total_loss).numpy() for loss in
+                          loss_values]
+    scaled_accuracy_values_T = [model.scale_value(acc, model.min_total_accuracy_T, model.max_total_accuracy_T).numpy()
+                                for acc in raw_accuracy_values_T]
+    scaled_accuracy_values_B = [model.scale_value(acc, model.min_total_accuracy_B, model.max_total_accuracy_B).numpy()
+                                for acc in raw_accuracy_values_B]
+
+    if not loss_values:
+        print("Debug: Loss values are empty. Check if the loss function is correctly implemented and called.")
+    else:
+        print("Debug: Loss values recorded:", loss_values)
+
+    model_output = model.predict(inputs)
+    print(f"Debug: model_output keys: {model_output.keys()}")
+
+    Temperature_pred = model_output['temperature_output']
+    Boundary_pred = model_output['boundary_output']
+
+    return loss_values, {
+        'raw_accuracy_T': raw_accuracy_values_T,
+        'raw_accuracy_B': raw_accuracy_values_B,
+        'scaled_accuracy_T': scaled_accuracy_values_T,
+        'scaled_accuracy_B': scaled_accuracy_values_B
+    }, Temperature_pred, Boundary_pred
+
+
 
 
 # For gradient plotting
