@@ -521,10 +521,20 @@ class App:
 
     def update_plots(self):
         t_idx = int(self.time_scale.get())
-        t_idx = t_idx if t_idx < self.T_arr_to_display.shape[1] else self.T_arr_to_display.shape[1] - 1
+        t_idx = min(t_idx, self.T_arr_to_display.shape[1] - 1)
 
+        # Update T(x) plot
         self.update_line_plot3(self.x_grid, self.T_arr_to_display[:, t_idx])
+
+        # Update 3D surface plot
         self.update_surface_plot(self.x_grid, self.t_grid, self.T_arr_to_display)
+
+        # Compute temperature from enthalpy for the current time step
+        H_current = self.H_arr[:, t_idx]
+        T_current = self.pcm.update_temperature(H_current, self.pcm)
+
+        # Update T(E) plot
+        self.update_line_plot(H_current, T_current)
 
         self.canvas1.draw()
         self.canvas2.draw()
@@ -621,13 +631,10 @@ class App:
         # Draw the canvas with all the plots
         canvas.draw()
 
-    def update_line_plot(self, x, y):
-        self.line1.set_data(x, y)
+    def update_line_plot(self, H_arr, T_arr):
+        self.line1.set_data(H_arr, T_arr)
         self.ax1.relim()
-        # self.ax1.set_xlim([np.min(x), np.max(x)])
-        # self.ax1.set_ylim([np.min(y), np.max(y)])
         self.ax1.autoscale_view()
-        self.canvas1.print_figure("TE.png")
         self.canvas1.draw()
 
     def update_line_plot3(self, x, y):
