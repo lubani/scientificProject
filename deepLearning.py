@@ -27,71 +27,85 @@ def custom_accuracy(y_true, y_pred):
     return accuracy
 
 
-
 class CustomPINNModel(tf.keras.Model):
     def __init__(self, input_dim, output_dim, alpha, T_m, T_a, boundary_indices, x_arr, t_arr, pcm, x_input,
                  batch_size=64, bound_mask_array=None, temp_mask_array=None,
                  initial_data=None, initial_data_T=None, initial_data_B=None,
                  y=None, y_T=None, y_B=None, moving_boundary_locations=None, x_max=1.0, gold_standard=None, **kwargs):
-
         super(CustomPINNModel, self).__init__(**kwargs)
+
+        # Save provided parameters
         self.T_arr = gold_standard
         self.x = x_input
         self.pcm = pcm
         self.batch_size = batch_size
         self.bound_mask_array = tf.convert_to_tensor(bound_mask_array, dtype=tf.float32)
         self.temp_mask_array = tf.convert_to_tensor(temp_mask_array, dtype=tf.float32)
-        self.ema_accuracy_T, self.ema_accuracy_B = None, None
-        self.min_total_loss = tf.Variable(tf.float32.max, trainable=False)
-        self.max_total_loss = tf.Variable(tf.float32.min, trainable=False)
-        self.min_total_accuracy_T = tf.Variable(tf.float32.max, trainable=False)
-        self.max_total_accuracy_T = tf.Variable(tf.float32.min, trainable=False)
-        self.min_total_accuracy_B = tf.Variable(tf.float32.max, trainable=False)
-        self.max_total_accuracy_B = tf.Variable(tf.float32.min, trainable=False)
-        self.scale_mse_T = 1.0
-        self.scale_mse_B = 1.0
-        self.scale_physics = 1.0
-        lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(initial_learning_rate=1e-2, decay_steps=10000, decay_rate=0.9)
-        self.x_arr = x_arr
-        self.t_arr = t_arr
-        self.nx = len(self.x_arr)
-        self.nt = len(self.t_arr)
-        self.x_max = x_max
-        self.reg_lambda = 0.01
-        self.lambda_1 = 1.0
-        self.lambda_2 = 1.0
-        he_initializer = tf.keras.initializers.HeNormal(seed=42)
-        glorot_initializer = tf.keras.initializers.GlorotNormal()
-        self.optimizer = tf.keras.optimizers.Adam(learning_rate=0.0001, clipvalue=1.0)
-
-        self.temperature_subnetwork = [
-            tf.keras.layers.Dense(64, kernel_initializer=he_initializer, kernel_regularizer=tf.keras.regularizers.l2(self.reg_lambda)) for i in range(3)]
-        self.temperature_subnetwork.extend([tf.keras.layers.PReLU() for i in range(3)])
-        self.temperature_subnetwork.append(tf.keras.layers.Dropout(0.3))
-
-        self.boundary_subnetwork = [
-            tf.keras.layers.Dense(32, kernel_initializer=he_initializer, activation='swish', kernel_regularizer=tf.keras.regularizers.l2(self.reg_lambda)) for i in range(2)]
-        self.boundary_subnetwork.append(tf.keras.layers.Dropout(0.3))
-
-        self.batch_norm_layers = [tf.keras.layers.BatchNormalization() for i in range(5)]
-
-        self.dense_layers = [tf.keras.layers.Dense(128, kernel_initializer=he_initializer, kernel_regularizer=tf.keras.regularizers.l2(self.reg_lambda)) for i in range(3)]
-        self.dense_layers.extend([tf.keras.layers.PReLU() for i in range(3)])
-        self.dense_layers.append(tf.keras.layers.Dropout(0.3))
-
-        self.output_layer_temperature = tf.keras.layers.Dense(output_dim, kernel_initializer=glorot_initializer,
-                                                              activation=scaled_sigmoid(T_a, T_m))
-        self.output_layer_boundary = tf.keras.layers.Dense(1, kernel_initializer=glorot_initializer, activation='softplus')
-
         self.alpha = alpha
         self.T_m = T_m
         self.T_a = T_a
         self.y_T = y_T
         self.y_B = y_B
         self.boundary_indices = boundary_indices
-        self.total_loss = None
+        self.x_arr = x_arr
+        self.t_arr = t_arr
+        self.nx = len(self.x_arr)
+        self.nt = len(self.t_arr)
+        self.x_max = x_max
         self.moving_boundary_locations = moving_boundary_locations
 
+        # Initialize min/max tracking variables
+        self.min_total_loss = tf.Variable(tf.float32.max, trainable=False)
+        self.max_total_loss = tf.Variable(tf.float32.min, trainable=False)
+        self.min_total_accuracy_T = tf.Variable(tf.float32.max, trainable=False)
+        self.max_total_accuracy_T = tf.Variable(tf.float32.min, trainable=False)
+        self.min_total_accuracy_B = tf.Variable(tf.float32.max, trainable=False)
+        self.max_total_accuracy_B = tf.Variable(tf.float32.min, trainable=False)
+
+        # Scaling factors for loss components
+        self.scale_mse_T = 1.0
+        self.scale_mse_B = 1.0
+        self.scale_physics = 10.0  # Increased scaling factor for physics loss
+
+        # Regularization parameter
+        self.reg_lambda = 0.01
+
+        # Learning rate and optimizer settings
+        self.optimizer = tf.keras.optimizers.Adam(learning_rate=0.001, clipvalue=1.0)
+
+        # Network initializations
+        he_initializer = tf.keras.initializers.HeNormal(seed=42)
+        glorot_initializer = tf.keras.initializers.GlorotNormal()
+
+        # Define temperature subnetwork
+        self.temperature_subnetwork = [
+            tf.keras.layers.Dense(64, kernel_initializer=he_initializer, kernel_regularizer=tf.keras.regularizers.l2(self.reg_lambda)) for i in range(3)
+        ]
+        self.temperature_subnetwork.extend([tf.keras.layers.PReLU() for i in range(3)])
+        self.temperature_subnetwork.append(tf.keras.layers.Dropout(0.3))
+
+        # Define boundary subnetwork
+        self.boundary_subnetwork = [
+            tf.keras.layers.Dense(32, kernel_initializer=he_initializer, activation='swish', kernel_regularizer=tf.keras.regularizers.l2(self.reg_lambda)) for i in range(2)
+        ]
+        self.boundary_subnetwork.append(tf.keras.layers.Dropout(0.3))
+
+        # Batch normalization layers
+        self.batch_norm_layers = [tf.keras.layers.BatchNormalization() for i in range(5)]
+
+        # Define dense layers for the shared network
+        self.dense_layers = [
+            tf.keras.layers.Dense(128, kernel_initializer=he_initializer, kernel_regularizer=tf.keras.regularizers.l2(self.reg_lambda)) for i in range(3)
+        ]
+        self.dense_layers.extend([tf.keras.layers.PReLU() for i in range(3)])
+        self.dense_layers.append(tf.keras.layers.Dropout(0.3))
+
+        # Define output layers
+        self.output_layer_temperature = tf.keras.layers.Dense(output_dim, kernel_initializer=glorot_initializer,
+                                                              activation=scaled_sigmoid(T_a, T_m))
+        self.output_layer_boundary = tf.keras.layers.Dense(1, kernel_initializer=glorot_initializer, activation='softplus')
+
+        # Handle normalization statistics for input and output
         if initial_data is not None:
             x_initial, _ = initial_data
             self.x_mean = np.mean(x_initial, axis=0)
@@ -100,37 +114,52 @@ class CustomPINNModel(tf.keras.Model):
             self.x_mean = 0.0
             self.x_std = 1.0
 
+        # Variables for tracking the loss statistics
         self.sum_total_loss = tf.Variable(0.0, trainable=False, dtype=tf.float32)
         self.sum_squared_total_loss = tf.Variable(0.0, trainable=False, dtype=tf.float32)
         self.num_steps = tf.Variable(0, trainable=False)
         self.ema_loss = None
 
-        if y is not None and moving_boundary_locations is not None:
-            if self.y_T is not None:
-                self.y_T_mean = np.mean(self.y_T)
-                self.y_T_std = np.std(self.y_T)
-            if self.y_B is not None:
-                self.y_B_mean = np.mean(self.y_B)
-                self.y_B_std = np.std(self.y_B)
-            print("Debug: y_B shape =", self.y_B.shape)
-            print(f"Is output_layer_boundary trainable? {self.output_layer_boundary.trainable}")
-            print("Initial weights of output_layer_boundary:", self.output_layer_boundary.get_weights())
-            self.initial_data_T = initial_data_T
-            self.initial_data_B = initial_data_B
-            if initial_data_T is not None:
-                x_initial_T, _ = initial_data_T
-                self.x_mean_T = np.mean(x_initial_T, axis=0)
-                self.x_std_T = np.std(x_initial_T, axis=0)
-            else:
-                self.x_mean_T = 0.0
-                self.x_std_T = 1.0
-            if initial_data_B is not None:
-                x_initial_B, _ = initial_data_B
-                self.x_mean_B = np.mean(x_initial_B, axis=0)
-                self.x_std_B = np.std(x_initial_B, axis=0)
-            else:
-                self.x_mean_B = 0.0
-                self.x_std_B = 1.0
+        # Calculate mean and standard deviation for the targets if provided
+        if y_T is not None:
+            self.y_T_mean = np.mean(y_T)
+            self.y_T_std = np.std(y_T)
+        else:
+            self.y_T_mean = 0.0
+            self.y_T_std = 1.0
+
+        if y_B is not None:
+            self.y_B_mean = np.mean(y_B)
+            self.y_B_std = np.std(y_B)
+        else:
+            self.y_B_mean = 0.0
+            self.y_B_std = 1.0
+
+        # Debug information
+        print("Debug: y_B shape =", self.y_B.shape if y_B is not None else None)
+        print(f"Is output_layer_boundary trainable? {self.output_layer_boundary.trainable}")
+        print("Initial weights of output_layer_boundary:", self.output_layer_boundary.get_weights())
+
+        # Initial data attributes
+        self.initial_data_T = initial_data_T
+        self.initial_data_B = initial_data_B
+
+        if initial_data_T is not None:
+            x_initial_T, _ = initial_data_T
+            self.x_mean_T = np.mean(x_initial_T, axis=0)
+            self.x_std_T = np.std(x_initial_T, axis=0)
+        else:
+            self.x_mean_T = 0.0
+            self.x_std_T = 1.0
+
+        if initial_data_B is not None:
+            x_initial_B, _ = initial_data_B
+            self.x_mean_B = np.mean(x_initial_B, axis=0)
+            self.x_std_B = np.std(x_initial_B, axis=0)
+        else:
+            self.x_mean_B = 0.0
+            self.x_std_B = 1.0
+
 
 
     def build(self, input_shape):
@@ -219,49 +248,6 @@ class CustomPINNModel(tf.keras.Model):
         physics_loss = tf.reduce_mean(heat_equation_loss)
 
         return physics_loss
-
-    # def is_boundary_func(self, temp_input, boundary_input, temp_mask_array, bound_mask_array):
-    #     print(f"temp_input shape before reshaping: {temp_input.shape}")  # Debug print
-    #
-    #     # Ensure this operation is compatible with TensorFlow's execution mode
-    #     batch_size = tf.shape(temp_input)[0]
-    #
-    #     # Assuming self.nx and self.nt are Python integers or can be converted to tensors
-    #     nx_tensor = tf.constant(self.nx, dtype=tf.int32)
-    #     nt_tensor = tf.constant(self.nt, dtype=tf.int32)
-    #
-    #     expected_num_elements = batch_size * nx_tensor * nt_tensor
-    #     actual_num_elements = tf.size(temp_input)
-    #
-    #     # Instead of a Python if statement, use tf.debugging.assert_equal for runtime checks in graph mode
-    #     tf.debugging.assert_equal(expected_num_elements, actual_num_elements,
-    #                               message="Mismatch in reshaping: expected and actual number of elements do not match.")
-    #
-    #     # Assume temp_input represents temperature values directly comparable to T_m
-    #     # and boundary_input represents spatial positions, which may not be directly used here
-    #     T_m_tensor = tf.constant(self.T_m, dtype=tf.float32)
-    #     tolerance = tf.constant(50.0, dtype=tf.float32)  # Example tolerance
-    #
-    #     # Proceed with reshaping if the number of elements matches
-    #     temp_input_reshaped = tf.reshape(temp_input, [batch_size, self.nx, self.nt])
-    #
-    #     # Create boolean masks based on the temperature conditions
-    #     is_solid = temp_input_reshaped < T_m_tensor - tolerance
-    #     is_mushy = tf.logical_and(temp_input_reshaped >= T_m_tensor - tolerance,
-    #                               temp_input_reshaped <= T_m_tensor + tolerance)
-    #     is_liquid = temp_input_reshaped > T_m_tensor + tolerance
-    #
-    #     # The actual application of phase (temp_mask_array) and boundary (bound_mask_array) masks would depend on how
-    #     # these conditions are intended to interact with the masks. For simplicity, let's assume you want to identify
-    #     # whether a given point is in the mushy zone and also satisfies the boundary conditions you've defined:
-    #     temp_mask_tensor = tf.cast(tf.reshape(temp_mask_array, [1, self.nx, self.nt]), dtype=tf.bool)
-    #     bound_mask_tensor = tf.cast(tf.reshape(bound_mask_array, [1, self.nx, self.nt]), dtype=tf.bool)
-    #
-    #     # Assuming mushy zone identification as the primary condition for demonstration
-    #     is_temp_boundary = tf.logical_and(is_mushy, temp_mask_tensor)
-    #     is_phase_boundary = tf.logical_and(is_mushy, bound_mask_tensor)
-    #
-    #     return is_temp_boundary, is_phase_boundary
 
     def stefan_loss_wrapper(self, x, y_T, y_B, T_arr, pcm, mask_T, mask_B):
         def loss(y_true, y_pred):
@@ -364,6 +350,7 @@ class CustomPINNModel(tf.keras.Model):
         tf.print(f"Updated {min_attr}: {new_min}")
         tf.print(f"Updated {max_attr}: {new_max}")
 
+
     @tf.function
     def train_step(self, data):
         inputs, targets, sample_weights = data
@@ -384,17 +371,15 @@ class CustomPINNModel(tf.keras.Model):
         self.update_min_max('total_accuracy_T', raw_accuracy_T)
         self.update_min_max('total_accuracy_B', raw_accuracy_B)
 
-        scaled_total_loss = self.scale_value(total_loss, self.min_total_loss, self.max_total_loss)
-        scaled_accuracy_T = self.scale_value(raw_accuracy_T, self.min_total_accuracy_T, self.max_total_accuracy_T)
-        scaled_accuracy_B = self.scale_value(raw_accuracy_B, self.min_total_accuracy_B, self.max_total_accuracy_B)
+        tf.print("train_step - total_loss:", total_loss)
+        tf.print("train_step - raw_accuracy_T:", raw_accuracy_T)
+        tf.print("train_step - raw_accuracy_B:", raw_accuracy_B)
 
-        tf.print("train_step - scaled_total_loss:", scaled_total_loss)
-        tf.print("train_step - scaled_accuracy_T:", scaled_accuracy_T)
-        tf.print("train_step - scaled_accuracy_B:", scaled_accuracy_B)
-
-        return {"loss": scaled_total_loss, "scaled_accuracy_T": scaled_accuracy_T,
-                "scaled_accuracy_B": scaled_accuracy_B,
-                "raw_accuracy_T": raw_accuracy_T, "raw_accuracy_B": raw_accuracy_B}
+        return {
+            "loss": total_loss,
+            "raw_accuracy_T": raw_accuracy_T,
+            "raw_accuracy_B": raw_accuracy_B
+        }
 
     def scale_value(self, value, min_value, max_value):
         if tf.equal(min_value, max_value):
@@ -812,10 +797,13 @@ def train_PINN(model, x, x_boundary, y_T, y_B, epochs, mask_T, mask_B, batch_siz
     model.build(input_shape={'temperature_input': x.shape, 'boundary_input': x_boundary.shape})
 
     history = model.fit(x=inputs, y=targets, sample_weight=sample_weights, epochs=epochs, batch_size=batch_size)
+    print(f"Debug: History keys: {history.history.keys()}")
 
     loss_values = history.history.get('loss', [])
-    raw_accuracy_values_T = history.history.get('temperature_output_custom_accuracy', [])
-    raw_accuracy_values_B = history.history.get('boundary_output_custom_accuracy', [])
+
+    # Retrieve accuracy metrics from the history object
+    raw_accuracy_values_T = history.history.get('raw_accuracy_T', [])
+    raw_accuracy_values_B = history.history.get('raw_accuracy_B', [])
 
     # Update min and max values for scaling
     if loss_values:
@@ -830,12 +818,9 @@ def train_PINN(model, x, x_boundary, y_T, y_B, epochs, mask_T, mask_B, batch_siz
         model.update_min_max('total_accuracy_B', tf.reduce_min(raw_accuracy_values_B))
         model.update_min_max('total_accuracy_B', tf.reduce_max(raw_accuracy_values_B))
 
-    scaled_loss_values = [model.scale_value(loss, model.min_total_loss, model.max_total_loss).numpy() for loss in
-                          loss_values]
-    scaled_accuracy_values_T = [model.scale_value(acc, model.min_total_accuracy_T, model.max_total_accuracy_T).numpy()
-                                for acc in raw_accuracy_values_T]
-    scaled_accuracy_values_B = [model.scale_value(acc, model.min_total_accuracy_B, model.max_total_accuracy_B).numpy()
-                                for acc in raw_accuracy_values_B]
+    # Use the raw accuracy values directly, since scaling is now handled in custom_accuracy
+    scaled_accuracy_values_T = raw_accuracy_values_T
+    scaled_accuracy_values_B = raw_accuracy_values_B
 
     if not loss_values:
         print("Debug: Loss values are empty. Check if the loss function is correctly implemented and called.")
@@ -848,14 +833,16 @@ def train_PINN(model, x, x_boundary, y_T, y_B, epochs, mask_T, mask_B, batch_siz
     Temperature_pred = model_output['temperature_output']
     Boundary_pred = model_output['boundary_output']
 
+    # Debugging prints before return
+    print(f"Debug (train_PINN): Scaled Accuracy T values: {scaled_accuracy_values_T}")
+    print(f"Debug (train_PINN): Raw Accuracy T values: {raw_accuracy_values_T}")
+    print(f"Debug (train_PINN): Scaled Accuracy B values: {scaled_accuracy_values_B}")
+    print(f"Debug (train_PINN): Raw Accuracy B values: {raw_accuracy_values_B}")
+
     return loss_values, {
-        'raw_accuracy_T': raw_accuracy_values_T,
-        'raw_accuracy_B': raw_accuracy_values_B,
         'scaled_accuracy_T': scaled_accuracy_values_T,
         'scaled_accuracy_B': scaled_accuracy_values_B
     }, Temperature_pred, Boundary_pred
-
-
 
 
 # For gradient plotting

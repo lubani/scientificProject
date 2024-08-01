@@ -503,13 +503,11 @@ class App:
             batch_size=self.batch_size
         )
 
+        print(f"Debug (prepare_PINN_model_and_train): Returned accuracy values: {accuracy_values}")
+
         self.scaled_accuracy_values = {
             'scaled_accuracy_T': accuracy_values['scaled_accuracy_T'],
             'scaled_accuracy_B': accuracy_values['scaled_accuracy_B']
-        }
-        self.raw_accuracy_values = {
-            'raw_accuracy_T': accuracy_values['raw_accuracy_T'],
-            'raw_accuracy_B': accuracy_values['raw_accuracy_B']
         }
 
         if self.loss_values is None:
@@ -582,25 +580,30 @@ class App:
         ax3 = self.fig_PINN.add_subplot(154, projection='3d')
         ax4 = self.fig_PINN.add_subplot(155)
 
+        # Debug prints for accuracy values before plotting
+        print(f"Debug: Scaled Accuracy T values: {self.scaled_accuracy_values['scaled_accuracy_T']}")
+        print(f"Debug: Scaled Accuracy B values: {self.scaled_accuracy_values['scaled_accuracy_B']}")
+
         # Plot Loss and Accuracy
         ax1.plot(self.loss_values)
         ax1.set_title('Loss during Training')
         ax1.set_xlabel('Epoch')
         ax1.set_ylabel('Loss')
 
-        ax2.plot(self.scaled_accuracy_values['scaled_accuracy_T'], label='Scaled Accuracy T')
-        ax2.plot(self.raw_accuracy_values['raw_accuracy_T'], label='Raw Accuracy T', linestyle='--')
-        ax2.set_title('Accuracy T during Training')
-        ax2.set_xlabel('Epoch')
-        ax2.set_ylabel('Accuracy')
-        ax2.legend()
+        # Plot scaled accuracies
+        if self.scaled_accuracy_values['scaled_accuracy_T']:
+            ax2.plot(self.scaled_accuracy_values['scaled_accuracy_T'], label='Scaled Accuracy T')
+            ax2.set_title('Scaled Accuracy T during Training')
+            ax2.set_xlabel('Epoch')
+            ax2.set_ylabel('Scaled Accuracy')
+            ax2.legend()
 
-        ax2a.plot(self.scaled_accuracy_values['scaled_accuracy_B'], label='Scaled Accuracy B')
-        ax2a.plot(self.raw_accuracy_values['raw_accuracy_B'], label='Raw Accuracy B', linestyle='--')
-        ax2a.set_title('Accuracy B during Training')
-        ax2a.set_xlabel('Epoch')
-        ax2a.set_ylabel('Accuracy')
-        ax2a.legend()
+        if self.scaled_accuracy_values['scaled_accuracy_B']:
+            ax2a.plot(self.scaled_accuracy_values['scaled_accuracy_B'], label='Scaled Accuracy B')
+            ax2a.set_title('Scaled Accuracy B during Training')
+            ax2a.set_xlabel('Epoch')
+            ax2a.set_ylabel('Scaled Accuracy')
+            ax2a.legend()
 
         # Reshape and plot the temperature distribution
         x_dim, t_dim = len(self.x_grid), len(self.t_grid)
