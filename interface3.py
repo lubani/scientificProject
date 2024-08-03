@@ -191,7 +191,7 @@ class App:
 
         # Create the dropdown menu for the main solution type selection
         solution_menu = tk.OptionMenu(self.frame, self.solution_type,
-                                      "Analytical", "Enthalpy Method", "Implicit", "Numerical", "PINN")
+                                      "Analytical", "Implicit", "Numerical", "PINN")
         solution_menu.grid(row=0, column=1, sticky='nsew')
         self.solution_type.trace('w', self.handle_solution_type_change)
         # Initialize gold standard variables
@@ -284,20 +284,17 @@ class App:
         self.temp_mask_arrays = {
             "Numerical": None,
             "Analytical": None,
-            "Implicit": None,
-            "Enthalpy Method": None
+            "Implicit": None
         }
         self.bound_mask_arrays = {
             "Numerical": None,
             "Analytical": None,
-            "Implicit": None,
-            "Enthalpy Method": None
+            "Implicit": None
         }
         self.temperature_solutions = {
             "Numerical": None,
             "Analytical": None,
-            "Implicit": None,
-            "Enthalpy Method": None
+            "Implicit": None
         }
 
         # Generate data
@@ -308,7 +305,7 @@ class App:
         nt = len(self.t_grid)
 
         print(f"Debug: nx = {nx}, nt = {nt}")
-        print(f"Debug: x_grid shape = {self.x_grid.shape}, t_grid shape = {self.t_grid.shape}")
+        # print(f"Debug: x_grid shape = {self.x_grid.shape}, t_grid shape = {self.t_grid.shape}")
 
         self.initial_data_T = (self.x, self.y_T)
         self.initial_data_B = (self.x_boundary, self.y_B)
@@ -320,9 +317,9 @@ class App:
             self.x_grid, self.t_grid, self.T_arr.copy(), self.pcm, self.temp_mask_arrays["Numerical"],
             self.bound_mask_arrays["Numerical"])
         self.temperature_solutions["Numerical"] = self.T_arr_numerical
-        print(f"Debug: T_arr_numerical shape = {self.T_arr_numerical.shape}")
-        print(f"Debug: temp_mask_arrays[\"Numerical\"] shape = {self.temp_mask_arrays['Numerical'].shape}")
-        print(f"Debug: bound_mask_arrays[\"Numerical\"] shape = {self.bound_mask_arrays['Numerical'].shape}")
+        # print(f"Debug: T_arr_numerical shape = {self.T_arr_numerical.shape}")
+        # print(f"Debug: temp_mask_arrays[\"Numerical\"] shape = {self.temp_mask_arrays['Numerical'].shape}")
+        # print(f"Debug: bound_mask_arrays[\"Numerical\"] shape = {self.bound_mask_arrays['Numerical'].shape}")
         print(f"Debug: temp_mask_arrays[\"Numerical\"]:\n{self.temp_mask_arrays['Numerical']}")
         print(f"Debug: bound_mask_arrays[\"Numerical\"]:\n{self.bound_mask_arrays['Numerical']}")
 
@@ -332,9 +329,9 @@ class App:
         self.temp_mask_arrays["Analytical"], self.bound_mask_arrays["Analytical"] = compute_mask_arrays(
             self.T_arr_analytical[:, -1], self.pcm)
         self.temperature_solutions["Analytical"] = self.T_arr_analytical
-        print(f"Debug: T_arr_analytical shape = {self.T_arr_analytical.shape}")
-        print(f"Debug: temp_mask_arrays[\"Analytical\"] shape = {self.temp_mask_arrays['Analytical'].shape}")
-        print(f"Debug: bound_mask_arrays[\"Analytical\"] shape = {self.bound_mask_arrays['Analytical'].shape}")
+        # print(f"Debug: T_arr_analytical shape = {self.T_arr_analytical.shape}")
+        # print(f"Debug: temp_mask_arrays[\"Analytical\"] shape = {self.temp_mask_arrays['Analytical'].shape}")
+        # print(f"Debug: bound_mask_arrays[\"Analytical\"] shape = {self.bound_mask_arrays['Analytical'].shape}")
         print(f"Debug: temp_mask_arrays[\"Analytical\"]:\n{self.temp_mask_arrays['Analytical']}")
         print(f"Debug: bound_mask_arrays[\"Analytical\"]:\n{self.bound_mask_arrays['Analytical']}")
 
@@ -356,38 +353,37 @@ class App:
             self.x_grid, self.t_grid, self.T_arr.copy(), self.H_arr.copy(), self.pcm, self.temp_mask_arrays["Implicit"],
             self.bound_mask_arrays["Implicit"])
         self.temperature_solutions["Implicit"] = self.T_arr_implicit
-        print(f"Debug: T_arr_implicit shape = {self.T_arr_implicit.shape}")
-        print(f"Debug: temp_mask_arrays[\"Implicit\"] shape = {self.temp_mask_arrays['Implicit'].shape}")
-        print(f"Debug: bound_mask_arrays[\"Implicit\"] shape = {self.bound_mask_arrays['Implicit'].shape}")
+        # print(f"Debug: T_arr_implicit shape = {self.T_arr_implicit.shape}")
+        # print(f"Debug: temp_mask_arrays[\"Implicit\"] shape = {self.temp_mask_arrays['Implicit'].shape}")
+        # print(f"Debug: bound_mask_arrays[\"Implicit\"] shape = {self.bound_mask_arrays['Implicit'].shape}")
         print(f"Debug: temp_mask_arrays[\"Implicit\"]:\n{self.temp_mask_arrays['Implicit']}")
         print(f"Debug: bound_mask_arrays[\"Implicit\"]:\n{self.bound_mask_arrays['Implicit']}")
 
         # Enthalpy method solution
-        print("Debug: Calculating enthalpy method solution")
-        try:
-            self.T_arr_enth, self.H_arr_enth, self.temp_mask_arrays["Enthalpy Method"], self.bound_mask_arrays[
-                "Enthalpy Method"], moving_boundary_indices_enthalpy = self.pcm.solve_stefan_problem_enthalpy(
-                self.pcm, self.x_grid, self.t_grid, self.T_arr.copy(), self.H_arr.copy(),
-                self.temp_mask_arrays["Enthalpy Method"], self.bound_mask_arrays["Enthalpy Method"])
-            self.temperature_solutions["Enthalpy Method"] = self.T_arr_enth
-            print(f"Debug: T_arr_enth shape = {self.T_arr_enth.shape}")
-            print(
-                f"Debug: temp_mask_arrays[\"Enthalpy Method\"] shape = {self.temp_mask_arrays['Enthalpy Method'].shape}")
-            print(
-                f"Debug: bound_mask_arrays[\"Enthalpy Method\"] shape = {self.bound_mask_arrays['Enthalpy Method'].shape}")
-            print(f"Debug: temp_mask_arrays[\"Enthalpy Method\"]:\n{self.temp_mask_arrays['Enthalpy Method']}")
-            print(f"Debug: bound_mask_arrays[\"Enthalpy Method\"]:\n{self.bound_mask_arrays['Enthalpy Method']}")
-        except Exception as e:
-            print(f"Error in calculating enthalpy method solution: {e}")
-            return
+        # print("Debug: Calculating enthalpy method solution")
+        # try:
+        #     self.T_arr_enth, self.H_arr_enth, self.temp_mask_arrays["Enthalpy Method"], self.bound_mask_arrays[
+        #         "Enthalpy Method"], moving_boundary_indices_enthalpy = self.pcm.solve_stefan_problem_enthalpy(
+        #         self.pcm, self.x_grid, self.t_grid, self.T_arr.copy(), self.H_arr.copy(),
+        #         self.temp_mask_arrays["Enthalpy Method"], self.bound_mask_arrays["Enthalpy Method"])
+        #     self.temperature_solutions["Enthalpy Method"] = self.T_arr_enth
+        #     # print(f"Debug: T_arr_enth shape = {self.T_arr_enth.shape}")
+        #     # print(
+        #     #     f"Debug: temp_mask_arrays[\"Enthalpy Method\"] shape = {self.temp_mask_arrays['Enthalpy Method'].shape}")
+        #     # print(
+        #     #     f"Debug: bound_mask_arrays[\"Enthalpy Method\"] shape = {self.bound_mask_arrays['Enthalpy Method'].shape}")
+        #     print(f"Debug: temp_mask_arrays[\"Enthalpy Method\"]:\n{self.temp_mask_arrays['Enthalpy Method']}")
+        #     print(f"Debug: bound_mask_arrays[\"Enthalpy Method\"]:\n{self.bound_mask_arrays['Enthalpy Method']}")
+        # except Exception as e:
+        #     print(f"Error in calculating enthalpy method solution: {e}")
+        #     return
 
         # Update moving boundary indices
         print("Debug: Updating moving boundary indices")
         self.moving_boundary_indices.update({
             "Analytical": moving_boundary_indices_analytical,
             "Numerical": moving_boundary_indices_numerical,
-            "Implicit": moving_boundary_indices_implicit,
-            "Enthalpy Method": moving_boundary_indices_enthalpy
+            "Implicit": moving_boundary_indices_implicit
         })
 
         print("Debug: calcAll finished successfully")
@@ -411,18 +407,18 @@ class App:
             self.temp_mask_array = self.temp_mask_arrays["Implicit"]
             self.bound_mask_array = self.bound_mask_arrays["Implicit"]
             self.moving_boundary_indices_to_display = self.moving_boundary_indices["Implicit"]
-        elif selected_solution == "Enthalpy Method":
-            self.T_arr_to_display = self.T_arr_enth
-            self.temp_mask_array = self.temp_mask_arrays["Enthalpy Method"]
-            self.bound_mask_array = self.bound_mask_arrays["Enthalpy Method"]
-            self.moving_boundary_indices_to_display = self.moving_boundary_indices["Enthalpy Method"]
+        # elif selected_solution == "Enthalpy Method":
+        #     self.T_arr_to_display = self.T_arr_enth
+        #     self.temp_mask_array = self.temp_mask_arrays["Enthalpy Method"]
+        #     self.bound_mask_array = self.bound_mask_arrays["Enthalpy Method"]
+        #     self.moving_boundary_indices_to_display = self.moving_boundary_indices["Enthalpy Method"]
         elif selected_solution == "PINN":
             self.prompt_for_gold_standard()
 
-        print(f"Debug: self.T_arr_to_display shape = {self.T_arr_to_display.shape}")
-        print(f"Debug: self.temp_mask_array shape = {self.temp_mask_array.shape}")
-        print(f"Debug: self.bound_mask_array shape = {self.bound_mask_array.shape}")
-        print(f"Debug: self.moving_boundary_indices_to_display shape = {self.moving_boundary_indices_to_display.shape}")
+        # print(f"Debug: self.T_arr_to_display shape = {self.T_arr_to_display.shape}")
+        # print(f"Debug: self.temp_mask_array shape = {self.temp_mask_array.shape}")
+        # print(f"Debug: self.bound_mask_array shape = {self.bound_mask_array.shape}")
+        # print(f"Debug: self.moving_boundary_indices_to_display shape = {self.moving_boundary_indices_to_display.shape}")
 
         self.update_plots()
 
@@ -455,12 +451,12 @@ class App:
         self.temp_mask_array = self.temp_mask_array[:min_length]
         self.bound_mask_array = self.bound_mask_array[:min_length]
 
-        print(f"Debug: x_input shape = {self.x_input.shape}")
-        print(f"Debug: x_boundary_input shape = {self.x_boundary_input.shape}")
-        print(f"Debug: y_T shape = {self.y_T.shape}")
-        print(f"Debug: y_B shape = {self.y_B.shape}")
-        print(f"Debug: temp_mask_array shape = {self.temp_mask_array.shape}")
-        print(f"Debug: bound_mask_array shape = {self.bound_mask_array.shape}")
+        # print(f"Debug: x_input shape = {self.x_input.shape}")
+        # print(f"Debug: x_boundary_input shape = {self.x_boundary_input.shape}")
+        # print(f"Debug: y_T shape = {self.y_T.shape}")
+        # print(f"Debug: y_B shape = {self.y_B.shape}")
+        # print(f"Debug: temp_mask_array shape = {self.temp_mask_array.shape}")
+        # print(f"Debug: bound_mask_array shape = {self.bound_mask_array.shape}")
         print(f"Debug: temp_mask_array: {self.temp_mask_array}")
         print(f"Debug: bound_mask_array: {self.bound_mask_array}")
 
@@ -698,7 +694,7 @@ class GoldStandardSelectionWindow(tk.Toplevel):
         self.on_submit = on_submit  # Callback function from the parent
 
         # Exclude the PINN option from the selection
-        self.solution_types = ["Analytical", "Enthalpy Method", "Implicit", "Numerical"]
+        self.solution_types = ["Analytical", "Implicit", "Numerical"]
 
         # Create a label
         label = tk.Label(self, text="Select a solution type to serve as a gold standard:")
