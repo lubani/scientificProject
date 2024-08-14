@@ -125,8 +125,8 @@ class InputWindow1(tk.Tk):
         material_label = tk.Label(self, text="Material:")
         material_label.grid(row=2, column=0)
         self.material_var = tk.StringVar()
-        self.material_var.set("Iron")  # Set default material to iron
-        material_options = ["Iron", "Regolith"]
+        self.material_var.set("Regolith")  # Set default material to iron
+        material_options = ["Regolith", "Iron"]
         self.material_dropdown = tk.OptionMenu(self, self.material_var, *material_options)
         self.material_dropdown.grid(row=2, column=1)
 
@@ -305,7 +305,6 @@ class App:
         nt = len(self.t_grid)
 
         print(f"Debug: nx = {nx}, nt = {nt}")
-        # print(f"Debug: x_grid shape = {self.x_grid.shape}, t_grid shape = {self.t_grid.shape}")
 
         self.initial_data_T = (self.x, self.y_T)
         self.initial_data_B = (self.x_boundary, self.y_B)
@@ -317,11 +316,9 @@ class App:
             self.x_grid, self.t_grid, self.T_arr.copy(), self.pcm, self.temp_mask_arrays["Numerical"],
             self.bound_mask_arrays["Numerical"])
         self.temperature_solutions["Numerical"] = self.T_arr_numerical
-        # print(f"Debug: T_arr_numerical shape = {self.T_arr_numerical.shape}")
-        # print(f"Debug: temp_mask_arrays[\"Numerical\"] shape = {self.temp_mask_arrays['Numerical'].shape}")
-        # print(f"Debug: bound_mask_arrays[\"Numerical\"] shape = {self.bound_mask_arrays['Numerical'].shape}")
-        print(f"Debug: temp_mask_arrays[\"Numerical\"]:\n{self.temp_mask_arrays['Numerical']}")
-        print(f"Debug: bound_mask_arrays[\"Numerical\"]:\n{self.bound_mask_arrays['Numerical']}")
+
+        # print(f"Debug: temp_mask_arrays[\"Numerical\"]:\n{self.temp_mask_arrays['Numerical']}")
+        # print(f"Debug: bound_mask_arrays[\"Numerical\"]:\n{self.bound_mask_arrays['Numerical']}")
 
         # Analytical solution
         print("Debug: Calculating analytical solution")
@@ -329,11 +326,9 @@ class App:
         self.temp_mask_arrays["Analytical"], self.bound_mask_arrays["Analytical"] = compute_mask_arrays(
             self.T_arr_analytical[:, -1], self.pcm)
         self.temperature_solutions["Analytical"] = self.T_arr_analytical
-        # print(f"Debug: T_arr_analytical shape = {self.T_arr_analytical.shape}")
-        # print(f"Debug: temp_mask_arrays[\"Analytical\"] shape = {self.temp_mask_arrays['Analytical'].shape}")
-        # print(f"Debug: bound_mask_arrays[\"Analytical\"] shape = {self.bound_mask_arrays['Analytical'].shape}")
-        print(f"Debug: temp_mask_arrays[\"Analytical\"]:\n{self.temp_mask_arrays['Analytical']}")
-        print(f"Debug: bound_mask_arrays[\"Analytical\"]:\n{self.bound_mask_arrays['Analytical']}")
+
+        # print(f"Debug: temp_mask_arrays[\"Analytical\"]:\n{self.temp_mask_arrays['Analytical']}")
+        # print(f"Debug: bound_mask_arrays[\"Analytical\"]:\n{self.bound_mask_arrays['Analytical']}")
 
         try:
             print("Debug: Calculating moving boundary indices for analytical solution")
@@ -341,7 +336,7 @@ class App:
                                                                                      T=self.T_arr_analytical,
                                                                                      T_m=self.pcm.T_m,
                                                                                      mode='moving_boundary')
-            print(f"Debug: Moving boundary indices (analytical) = {moving_boundary_indices_analytical}")
+            # print(f"Debug: Moving boundary indices (analytical) = {moving_boundary_indices_analytical}")
         except Exception as e:
             print(f"Error in calculating moving boundary indices (analytical): {e}")
             return
@@ -353,30 +348,9 @@ class App:
             self.x_grid, self.t_grid, self.T_arr.copy(), self.H_arr.copy(), self.pcm, self.temp_mask_arrays["Implicit"],
             self.bound_mask_arrays["Implicit"])
         self.temperature_solutions["Implicit"] = self.T_arr_implicit
-        # print(f"Debug: T_arr_implicit shape = {self.T_arr_implicit.shape}")
-        # print(f"Debug: temp_mask_arrays[\"Implicit\"] shape = {self.temp_mask_arrays['Implicit'].shape}")
-        # print(f"Debug: bound_mask_arrays[\"Implicit\"] shape = {self.bound_mask_arrays['Implicit'].shape}")
+
         print(f"Debug: temp_mask_arrays[\"Implicit\"]:\n{self.temp_mask_arrays['Implicit']}")
         print(f"Debug: bound_mask_arrays[\"Implicit\"]:\n{self.bound_mask_arrays['Implicit']}")
-
-        # Enthalpy method solution
-        # print("Debug: Calculating enthalpy method solution")
-        # try:
-        #     self.T_arr_enth, self.H_arr_enth, self.temp_mask_arrays["Enthalpy Method"], self.bound_mask_arrays[
-        #         "Enthalpy Method"], moving_boundary_indices_enthalpy = self.pcm.solve_stefan_problem_enthalpy(
-        #         self.pcm, self.x_grid, self.t_grid, self.T_arr.copy(), self.H_arr.copy(),
-        #         self.temp_mask_arrays["Enthalpy Method"], self.bound_mask_arrays["Enthalpy Method"])
-        #     self.temperature_solutions["Enthalpy Method"] = self.T_arr_enth
-        #     # print(f"Debug: T_arr_enth shape = {self.T_arr_enth.shape}")
-        #     # print(
-        #     #     f"Debug: temp_mask_arrays[\"Enthalpy Method\"] shape = {self.temp_mask_arrays['Enthalpy Method'].shape}")
-        #     # print(
-        #     #     f"Debug: bound_mask_arrays[\"Enthalpy Method\"] shape = {self.bound_mask_arrays['Enthalpy Method'].shape}")
-        #     print(f"Debug: temp_mask_arrays[\"Enthalpy Method\"]:\n{self.temp_mask_arrays['Enthalpy Method']}")
-        #     print(f"Debug: bound_mask_arrays[\"Enthalpy Method\"]:\n{self.bound_mask_arrays['Enthalpy Method']}")
-        # except Exception as e:
-        #     print(f"Error in calculating enthalpy method solution: {e}")
-        #     return
 
         # Update moving boundary indices
         print("Debug: Updating moving boundary indices")
@@ -457,8 +431,8 @@ class App:
         # print(f"Debug: y_B shape = {self.y_B.shape}")
         # print(f"Debug: temp_mask_array shape = {self.temp_mask_array.shape}")
         # print(f"Debug: bound_mask_array shape = {self.bound_mask_array.shape}")
-        print(f"Debug: temp_mask_array: {self.temp_mask_array}")
-        print(f"Debug: bound_mask_array: {self.bound_mask_array}")
+        # print(f"Debug: temp_mask_array: {self.temp_mask_array}")
+        # print(f"Debug: bound_mask_array: {self.bound_mask_array}")
 
         self.model = CustomPINNModel(
             input_dim=2,
@@ -524,11 +498,11 @@ class App:
         self.update_surface_plot(self.x_grid, self.t_grid, self.T_arr_to_display)
 
         # Compute temperature from enthalpy for the current time step
-        H_current = self.H_arr[:, t_idx]
-        T_current = self.pcm.update_temperature(H_current, self.pcm)
+        # H_current = self.H_arr[:, t_idx]
+        # T_current = self.pcm.update_temperature(H_current, self.pcm)
 
         # Update T(E) plot
-        self.update_line_plot(H_current, T_current)
+        self.update_line_plot(self.H_arr_final, self.T_arr_to_display)
 
         self.canvas1.draw()
         self.canvas2.draw()
@@ -656,8 +630,8 @@ class App:
     def update_surface_plot(self, x_grid, t_arr_final, T_arr_to_display):
         self.ax2.cla()
         x_dim, t_dim = len(x_grid), len(t_arr_final)
-        print(
-            f"Debug: update_surface_plot - x_dim: {x_dim}, t_dim: {t_dim}, T_arr_to_display shape: {T_arr_to_display.shape}")
+        # print(
+        #     f"Debug: update_surface_plot - x_dim: {x_dim}, t_dim: {t_dim}, T_arr_to_display shape: {T_arr_to_display.shape}")
 
         try:
             if T_arr_to_display.shape[1] != t_dim:
@@ -673,8 +647,8 @@ class App:
             self.ax2.set_zlabel("T")
             self.canvas2.draw()
 
-            print(
-                f"Debug: update_surface_plot - X shape: {X.shape}, T shape: {T.shape}, T_reshaped shape: {T_reshaped.shape}")
+            # print(
+            #     f"Debug: update_surface_plot - X shape: {X.shape}, T shape: {T.shape}, T_reshaped shape: {T_reshaped.shape}")
         except Exception as e:
             print(f"Error in update_surface_plot: {e}")
 
@@ -683,7 +657,7 @@ class App:
         self.root.mainloop()
 
     def on_closing(self):
-        print("Main window is closing")
+        # print("Main window is closing")
         self.root.destroy()
 
 
