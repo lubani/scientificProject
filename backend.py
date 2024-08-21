@@ -7,7 +7,35 @@ from tensorflow.keras.layers import Flatten  # Use the Flatten layer from tensor
 from scipy.linalg import lu_factor, lu_solve
 from scipy.special import erf
 from scipy.sparse import lil_matrix, csc_matrix
-def compute_mask_arrays(T, cls, tolerance=100, phase_mask=None, boundary_mask=None):
+
+
+
+# def compute_mask_arrays(T, cls, tolerance=100, phase_mask=None, boundary_mask=None):
+#     if phase_mask is None:
+#         phase_mask = np.zeros_like(T, dtype=int)
+#     if boundary_mask is None:
+#         boundary_mask = np.zeros_like(T, dtype=int)
+#
+#     T_minus = cls.T_m - tolerance
+#     T_plus = cls.T_m + tolerance
+#
+#     # Initialize phase mask
+#     phase_mask[:] = 0
+#     phase_mask[T < T_minus] = 0  # Solid phase
+#     phase_mask[(T >= T_minus) & (T <= T_plus)] = 1  # Phase transition (melting/freezing)
+#     phase_mask[T > T_plus] = 2  # Liquid phase
+#
+#     # Initialize boundary mask
+#     boundary_mask[:] = 0
+#     boundary_mask[phase_mask == 1] = 1  # Mark where phase change occurs
+#
+#     # Debugging information
+#     # print(f"T_minus: {T_minus}, T_plus: {T_plus}")
+#     # print(f"phase_mask: {np.unique(phase_mask, return_counts=True)}")
+#     # print(f"boundary_mask: {np.unique(boundary_mask, return_counts=True)}")
+#
+#     return phase_mask, boundary_mask
+def compute_mask_arrays(T, H, cls, tolerance=100, phase_mask=None, boundary_mask=None):
     if phase_mask is None:
         phase_mask = np.zeros_like(T, dtype=int)
     if boundary_mask is None:
@@ -16,13 +44,23 @@ def compute_mask_arrays(T, cls, tolerance=100, phase_mask=None, boundary_mask=No
     T_minus = cls.T_m - tolerance
     T_plus = cls.T_m + tolerance
 
-    phase_mask[:] = 0
-    phase_mask[T < T_minus] = 0
-    phase_mask[(T >= T_minus) & (T <= T_plus)] = 1
-    phase_mask[T > T_plus] = 2
+    # Calculate the latent heat enthalpy value
+    H_latent = cls.LH * cls.rho
 
+    # Initialize phase mask based on enthalpy
+    phase_mask[:] = 0
+    phase_mask[H < H_latent - tolerance] = 0  # Solid phase
+    phase_mask[(H >= H_latent - tolerance) & (H <= H_latent + tolerance)] = 1  # Mushy zone (phase transition)
+    phase_mask[H > H_latent + tolerance] = 2  # Liquid phase
+
+    # Initialize boundary mask
     boundary_mask[:] = 0
-    boundary_mask[phase_mask == 1] = 1
+    boundary_mask[phase_mask == 1] = 1  # Mark where phase change occurs
+
+    # Debugging prints to check mask values
+    print(f"compute_mask_arrays: H_min = {H.min()}, H_max = {H.max()}")
+    print(f"compute_mask_arrays: phase_mask counts = {np.bincount(phase_mask.flatten())}")
+    print(f"compute_mask_arrays: boundary_mask counts = {np.bincount(boundary_mask.flatten())}")
 
     return phase_mask, boundary_mask
 
@@ -107,7 +145,7 @@ class PCM(ABC):
             T_arr[:, t_idx] = T_new
 
             # Update phase mask based on the new temperature
-            temp_mask_array[:, t_idx], bound_mask_array[:, t_idx] = compute_mask_arrays(T_new, cls)
+            temp_mask_array[:, t_idx], bound_mask_array[:, t_idx] = compute_mask_arrays(T_new, H_new, cls)
 
             # Calculate the boundary index for the current time step
             phase_change_indices = np.where(np.abs(T_new - cls.T_m) <= 100)[0]  # Adjust tolerance as needed
@@ -126,8 +164,12 @@ class PCM(ABC):
 
     def initialize_enthalpy_temperature_arrays(self, x_arr, cls, t_steps):
         # Initialize the temperature array
-        T = np.ones((len(x_arr), t_steps)) * cls.T_a
-        T[0, :] = cls.T_m + 10  # Set the first cell temperature to T_m + 10
+        T = np.ones((len(x_arr), t_steps)) * cls.T_a  # Start all cells at ambient temperature
+        T[0, :] = cls.T_m + 10  # Set the first spatial cell at the first time step to T_m + 10
+
+        # Introduce a slight gradient or perturbation to the initial temperature array
+        # for i in range(1, len(x_arr)):
+        #     T[i, 0] = cls.T_a + np.random.uniform(0, 5)  # Add a small random perturbation
 
         # Initialize the enthalpy array
         H = self.initial_enthalpy(x_arr, cls, t_steps)
@@ -198,8 +240,6 @@ class PCM(ABC):
             dt_indices = np.isclose(x[:, 1], dt, atol=atol, rtol=rtol)
             boundary_indices['condition1'] = np.where(dt_indices & np.isclose(x[:, 0], 0, atol=atol, rtol=rtol))[0]
             boundary_indices['condition2'] = np.where(dt_indices & ~np.isclose(x[:, 0], x_max, atol=atol, rtol=rtol))[0]
-            boundary_indices['condition1'] = np.asarray(boundary_indices['condition1'])
-            boundary_indices['condition2'] = np.asarray(boundary_indices['condition2'])
             return boundary_indices
 
         elif mode == 'moving_boundary':
@@ -373,7 +413,7 @@ class Regolith(PCM):
     LH = 1429   # Latent heat in J/kg
     rho = 1.8   # Density in kg/m³
     T_a = 253   # Ambient temperature in Kelvin
-    cycle_duration = 2551443  # Lunar cycle duration in seconds
+    cycle_duration = 708  # Lunar cycle duration in seconds
 
     def __init__(self):
         self.dx = 0.15  # Spatial step
@@ -396,38 +436,44 @@ class Regolith(PCM):
         # Set the solar incidence angle
         self.solar_incidence_angle = 45  # degrees
 
+        # Define heat_source_max as an attribute for Regolith
+        self.heat_source_max = 100
+
         print(f"Calculated dt = {self.dt}")
         print(f'alpha = {self.alpha2}')
-
 
     def generate_data(self, x_max, t_max):
         self.x_max = x_max  # Save x_max as an instance attribute
         x_grid = np.arange(0, x_max, self.dx)
-        t_grid = np.arange(self.dt, t_max, self.dt)
+        t_grid = np.arange(self.dt, t_max, self.dt)  # Exclude the final time step
 
-        # print(f"x_grid size: {len(x_grid)}, t_grid size: {len(t_grid)}")
-
+        # Ensure t_grid is not empty
         if len(t_grid) == 0:
             raise ValueError("t_grid has no elements. Ensure t_max > dt and dt is reasonably small.")
 
         X, T = np.meshgrid(x_grid, t_grid, indexing='ij')
         x_features = np.column_stack([X.ravel(), T.ravel()])
 
-        y_T = np.full(x_features.shape[0], self.T_a, dtype=np.float64)
-        y_B = y_T.copy()
-        x_boundary = np.zeros_like(x_features, dtype=np.float64)
+        # Initialize temperature (y_T) and boundary (y_B) arrays
+        y_T = np.full(x_features.shape[0], self.T_a, dtype=np.float64)  # Ambient temperature for all
+        y_B = np.zeros_like(y_T, dtype=np.float64)  # Initialize boundary array as zeros
+        x_boundary = np.zeros_like(x_features, dtype=np.float64)  # Initialize boundary features as zeros
 
-        # Set initial boundary condition at x=0
+        # Set initial boundary condition at x=0 (e.g., higher temperature at the boundary)
         boundary_condition_indices = x_features[:, 0] == 0
-        y_T[boundary_condition_indices] = self.T_m + 10.0
+        y_T[boundary_condition_indices] = self.T_m + 10.0  # Temperature at the boundary
+        y_B[boundary_condition_indices] = 1.0  # Mark boundary location
 
-        # Initialize temperature and enthalpy arrays
-        T_arr = np.full((len(x_grid), len(t_grid)), self.T_a)
-        T_arr[0, 0] = self.T_m + 10.0
-        H_arr = self.calcEnthalpy2(T_arr[:, 0], self).reshape(-1, 1)
-        H_arr = np.hstack([H_arr, np.zeros((len(x_grid), len(t_grid) - 1))])
+        # Use provided methods to initialize temperature and enthalpy arrays
+        T_arr, H_arr = self.initialize_enthalpy_temperature_arrays(x_grid, self, len(t_grid))
+
+        # Debugging prints to visualize initial conditions
+        print(f"Initial T_arr shape: {T_arr.shape}")
+        print(f"Initial H_arr shape: {H_arr.shape}")
+        print(f"Initial boundary condition indices: {np.sum(boundary_condition_indices)}")
 
         return x_features, y_T, y_B, x_boundary, x_grid, t_grid, T_arr, H_arr
+
 
     def explicitNumerical(self, x_arr, t_arr, T_arr, cls, phase_mask_array=None, boundary_mask_array=None):
         nx = len(x_arr)
@@ -438,26 +484,58 @@ class Regolith(PCM):
             boundary_mask_array = np.zeros((nx, num_timesteps), dtype=int)
 
         alpha = cls.alpha(cls.k, cls.c, cls.rho)
-        moving_boundary_indices = None
+        max_increase = 1000  # Example cap for temperature increase
+        moving_boundary_indices = np.full(num_timesteps, -1, dtype=int)  # Initialize moving_boundary_indices
+
+        # Initial condition: Set the first time step
+        T_arr[:, 0] = cls.T_a  # Ambient temperature for all spatial cells
+        T_arr[0, :] = cls.T_m + 10.0  # Higher temperature at the first spatial cell
+
+        T_minus = cls.T_m - 100  # Assuming the default tolerance of 100
+        T_plus = cls.T_m + 100
 
         for timestep in range(1, num_timesteps):
             T_old = T_arr[:, timestep - 1]
             diffusive_term = (np.roll(T_old, -1) - 2 * T_old + np.roll(T_old, 1))
             T_new = T_old + (alpha * cls.dt / cls.dx ** 2) * diffusive_term
 
-            # Heat source effect at x=0 based on lunar cycle
-            heat_source = cls.heat_source_function(0, t_arr[timestep], cls.cycle_duration, heat_source_max=20000)
-            T_new[0] = Regolith.T_m + heat_source / (cls.rho * cls.c) if heat_source > 0 else T_new[0]
+            # Debug print statements to check temperature evolution
+            print(f"Timestep {timestep}: max T_old = {np.max(T_old)}, min T_old = {np.min(T_old)}")
+            print(
+                f"Timestep {timestep}: max diffusive_term = {np.max(diffusive_term)}, min diffusive_term = {np.min(diffusive_term)}")
+            print(f"Timestep {timestep}: max T_new = {np.max(T_new)}, min T_new = {np.min(T_new)}")
 
-            T_new[-1] = T_old[-1]
+            # Update temperature at the boundary
+            heat_source = cls.heat_source_function(0, t_arr[timestep], cls.cycle_duration, heat_source_max=10)
+            if heat_source > 0:
+                heat_contribution = min(heat_source / (cls.rho * cls.c), max_increase)
+                T_new[0] = T_old[0] + heat_contribution
+
+            T_new[-1] = T_old[-1]  # Maintain the last cell's temperature
+
+            max_temperature = 4000
+            T_new = np.clip(T_new, cls.T_a, max_temperature)
+
+            # More debug prints to monitor boundary conditions and heat source effects
+            print(f"Timestep {timestep}: T_new[0] = {T_new[0]}, T_new[-1] = {T_new[-1]}")
+            print(f"Timestep {timestep}: heat_source = {heat_source}")
 
             T_arr[:, timestep] = T_new
-            phase_mask_array[:, timestep], boundary_mask_array[:, timestep] = compute_mask_arrays(T_new, cls)
 
-        if moving_boundary_indices is None:
-            x_features = np.column_stack([np.tile(x_arr, len(t_arr)), np.repeat(t_arr, len(x_arr))])
-            moving_boundary_indices = self.calculate_boundary_indices(x_features, x_arr[-1], cls.dt, T=T_arr,
-                                                                      T_m=cls.T_m, mode='moving_boundary')
+            # Directly compute the phase mask and boundary mask in the loop
+            phase_mask_array[:, timestep] = np.where(T_new < T_minus, 0, np.where(T_new <= T_plus, 1, 2))
+            boundary_mask_array[:, timestep] = np.where(phase_mask_array[:, timestep] == 1, 1, 0)
+
+            # Update moving boundary indices using the provided method
+            moving_boundary_indices[timestep] = self.calculate_boundary_indices(
+                x=x_arr,
+                x_max=x_arr[-1],
+                dt=cls.dt,
+                T=T_arr,
+                T_m=cls.T_m,
+                mode='moving_boundary',
+                tolerance=100
+            )[timestep]
 
         return T_arr, phase_mask_array, boundary_mask_array, moving_boundary_indices
 
@@ -472,15 +550,17 @@ class Regolith(PCM):
 
         moving_boundary_indices = np.full(num_timesteps, -1, dtype=int)
 
-        # Initial condition
-        T_arr[:, 0] = cls.T_a  # Set all to ambient temperature
-        T_arr[0, 0] = cls.T_m + 10.0  # Set the first spatial cell to T_m + 10.0
+        # Initial condition: Set the first time step
+        T_arr[:, 0] = cls.T_a  # Ambient temperature for all spatial cells
+        T_arr[0, :] = cls.T_m + 10.0  # Higher temperature at the first spatial cell
 
         for time_step in range(1, num_timesteps):
             T_old = T_arr[:, time_step - 1]
 
+            # Heat source function specific to regolith
+            heat_source = cls.heat_source_function(x_arr, t_arr[time_step], cls.cycle_duration, cls.heat_source_max)
+
             # Explicit update for the nonlinear heat source term
-            heat_source = self.heat_source_function(x_arr, t_arr[time_step], cls.cycle_duration, cls.T_m)
             T_explicit = T_old + cls.dt * heat_source / (cls.rho * cls.c)
 
             # Calculate thermal properties
@@ -491,35 +571,26 @@ class Regolith(PCM):
             lmbda_vals = cls.dt / (cls.dx ** 2) * alpha_vals
 
             # Construct tridiagonal matrix A for the implicit diffusion term
-            diagonals = [
-                -lmbda_vals[1:],  # Lower diagonal
-                1 + 2 * lmbda_vals,  # Main diagonal
-                -lmbda_vals[:-1]  # Upper diagonal
-            ]
-            A = diags(diagonals, [-1, 0, 1], shape=(num_segments, num_segments)).tocsc()
-
-            # Construct the right-hand side vector b
-            b = T_explicit.copy()
+            A = lil_matrix((num_segments, num_segments))
+            A.setdiag(1 + 2 * lmbda_vals)
+            A.setdiag(-lmbda_vals[1:], -1)
+            A.setdiag(-lmbda_vals[:-1], 1)
 
             # Apply boundary conditions
             A[0, :] = 0
             A[0, 0] = 1
-            # b[0] = cls.T_m + 10.0  # Fixed temperature at the first cell
 
             # Do not fix the temperature at the rightmost cell, allowing it to evolve
             A[-1, -2] = -lmbda_vals[-1]  # Adjust the last cell in the matrix A
             A[-1, -1] = 1 + lmbda_vals[-1]
-            # The right-hand side b already reflects T_explicit, so no need to modify it further
 
-            print(f"Debug: Time step {time_step} - Matrix A:\n{A.toarray()}")
-            print(f"Debug: Time step {time_step} - Vector b: {b}")
+            # Convert A to CSC format for efficient solving
+            A = A.tocsc()
 
             try:
                 # Solve the system using LU decomposition
                 lu = splu(A)
-                T_new = lu.solve(b)
-
-                print(f"Debug: Time step {time_step} - T_new: {T_new}")
+                T_new = lu.solve(T_explicit)
 
                 # Calculate new enthalpy from updated temperature
                 H_new = cls.calcEnthalpy2(T_new, cls)
@@ -605,7 +676,7 @@ class Regolith(PCM):
 
 
 class Iron(PCM):
-    T_m, LH, rho, T_a = 1810, 247000, 7870, 293  # Units should be consistent
+    T_m, LH, rho, T_a = 1810, 247000, 7870, 293
     c_solid = 0.449  # specific heat of solid iron in J/g°C
     c_liquid = 0.82  # specific heat of liquid iron in J/g°C
     cycle_duration = 86400  # seconds for a day
@@ -650,7 +721,6 @@ class Iron(PCM):
 
         return x_features, y_T, y_B, x_boundary, x_grid, t_grid, T_arr, H_arr
 
-
     def explicitNumerical(self, x_arr, t_arr, T_arr, cls, phase_mask_array=None, boundary_mask_array=None):
         nx = len(x_arr)
         num_timesteps = len(t_arr)
@@ -660,23 +730,35 @@ class Iron(PCM):
             boundary_mask_array = np.zeros((nx, num_timesteps), dtype=int)
 
         alpha = cls.alpha(cls.k, cls.c, cls.rho)
-        moving_boundary_indices = None
+        moving_boundary_indices = np.full(num_timesteps, -1, dtype=int)  # Initialize moving_boundary_indices
+
+        T_minus = cls.T_m - 100  # Assuming the default tolerance of 100
+        T_plus = cls.T_m + 100
 
         for timestep in range(1, num_timesteps):
             T_old = T_arr[:, timestep - 1]
             diffusive_term = (np.roll(T_old, -1) - 2 * T_old + np.roll(T_old, 1))
             T_new = T_old + (alpha * cls.dt / cls.dx ** 2) * diffusive_term
 
-            T_new[0] = cls.T_m + 10.0
-            T_new[-1] = T_old[-1]
+            T_new[0] = cls.T_m + 10.0  # Fix the left boundary to T_m + 10.0
+            T_new[-1] = T_old[-1]  # Maintain the last cell's temperature
 
             T_arr[:, timestep] = T_new
-            phase_mask_array[:, timestep], boundary_mask_array[:, timestep] = compute_mask_arrays(T_new, cls)
 
-        if moving_boundary_indices is None:
+            # Directly compute the phase mask and boundary mask in the loop
+            phase_mask_array[:, timestep] = np.where(T_new < T_minus, 0, np.where(T_new <= T_plus, 1, 2))
+            boundary_mask_array[:, timestep] = np.where(phase_mask_array[:, timestep] == 1, 1, 0)
+
+        if np.all(moving_boundary_indices == -1):  # Check if moving_boundary_indices was never updated
             x_features = np.column_stack([np.tile(x_arr, len(t_arr)), np.repeat(t_arr, len(x_arr))])
-            moving_boundary_indices = self.calculate_boundary_indices(x_features, x_arr[-1], cls.dt, T=T_arr,
-                                                                      T_m=cls.T_m, mode='moving_boundary')
+            moving_boundary_indices = self.calculate_boundary_indices(
+                x_features,
+                x_arr[-1],
+                cls.dt,
+                T=T_arr,
+                T_m=cls.T_m,
+                mode='moving_boundary'
+            )
 
         return T_arr, phase_mask_array, boundary_mask_array, moving_boundary_indices
 
@@ -691,12 +773,18 @@ class Iron(PCM):
 
         moving_boundary_indices = np.full(num_timesteps, -1, dtype=int)
 
-        # Apply the boundary conditions at time step 0
-        T_arr[0, 0] = cls.T_m + 10  # First spatial cell
-        T_arr[1:, 0] = cls.T_a  # All other spatial cells
+        # Initial condition: Set the first time step
+        T_arr[:, 0] = cls.T_a  # Ambient temperature for all spatial cells
+        T_arr[0, :] = cls.T_m + 10.0  # Higher temperature at the first spatial cell
 
         for time_step in range(1, num_timesteps):
             T_old = T_arr[:, time_step - 1]
+
+            # Heat source function specific to iron
+            heat_source = cls.heat_source_function(x_arr, t_arr[time_step])
+
+            # Explicit update for the nonlinear heat source term
+            T_explicit = T_old + cls.dt * heat_source / (cls.rho * cls.c)
 
             # Calculate thermal properties
             k_vals = np.array([cls.calcThermalConductivity(T_old[i]) for i in range(num_segments)])
@@ -705,32 +793,27 @@ class Iron(PCM):
             alpha_vals = k_vals / (c_vals * rho)
             lmbda_vals = cls.dt / (cls.dx ** 2) * alpha_vals
 
-            # Construct tridiagonal matrix A
-            diagonals = [
-                -lmbda_vals[1:],
-                1 + 2 * lmbda_vals,
-                -lmbda_vals[:-1]
-            ]
-            A = diags(diagonals, [-1, 0, 1], shape=(num_segments, num_segments)).toarray()
-
-            # Construct the right-hand side vector b
-            b = T_old.copy()
+            # Construct tridiagonal matrix A for the implicit diffusion term
+            A = lil_matrix((num_segments, num_segments))
+            A.setdiag(1 + 2 * lmbda_vals)
+            A.setdiag(-lmbda_vals[1:], -1)
+            A.setdiag(-lmbda_vals[:-1], 1)
 
             # Apply boundary conditions
             A[0, :] = 0
             A[0, 0] = 1
-            b[0] = cls.T_m + 10  # Fixed temperature at the first cell
 
-            A[-1, :] = 0
-            A[-1, -1] = 1
-            b[-1] = cls.T_a  # Fixed ambient temperature at the last cell
+            # Do not fix the temperature at the rightmost cell, allowing it to evolve
+            A[-1, -2] = -lmbda_vals[-1]  # Adjust the last cell in the matrix A
+            A[-1, -1] = 1 + lmbda_vals[-1]
+
+            # Convert A to CSC format for efficient solving
+            A = A.tocsc()
 
             try:
                 # Solve the system using LU decomposition
                 lu = splu(A)
-                T_new = lu.solve(b)
-
-                print(f"Debug: Time step {time_step} - T_new: {T_new}")
+                T_new = lu.solve(T_explicit)
 
                 # Calculate new enthalpy from updated temperature
                 H_new = cls.calcEnthalpy2(T_new, cls)
@@ -742,19 +825,12 @@ class Iron(PCM):
                 phase_mask_array[:, time_step] = phase_mask
                 boundary_mask_array[:, time_step] = boundary_mask
 
-                # print(f"Debug: Time step {time_step} - phase_mask: {phase_mask}")
-                # print(f"Debug: Time step {time_step} - boundary_mask: {boundary_mask}")
-
                 moving_boundary_indices[time_step] = self.calculate_boundary_indices(
                     x_arr, self.x_max, cls.dt, T=T_arr, T_m=cls.T_m, mode='moving_boundary', tolerance=100
                 )[time_step]
             except Exception as e:
                 print(f"An error occurred: {e}")
                 break
-
-        # print(f"Debug: Final phase_mask_array: {phase_mask_array}")
-        # print(f"Debug: Final boundary_mask_array: {boundary_mask_array}")
-        # print(f"Debug: Final moving_boundary_indices: {moving_boundary_indices}")
 
         return T_arr, H_arr, phase_mask_array, boundary_mask_array, moving_boundary_indices
 

@@ -20,11 +20,23 @@ def scaled_sigmoid(T_a, T_m, offset=256):
     return activation
 
 
-def custom_accuracy(y_true, y_pred):
+def custom_accuracy(y_true, y_pred, min_value, max_value):
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
     accuracy = tf.reduce_mean(tf.abs(y_true - y_pred))
-    return accuracy
+
+    # Handle cases where min and max are the same to avoid division by zero
+    if tf.equal(min_value, max_value):
+        scaled_accuracy = tf.constant(0.0, dtype=tf.float32)
+    else:
+        scaled_accuracy = (accuracy - min_value) / (max_value - min_value)
+        scaled_accuracy = 1.0 - tf.clip_by_value(scaled_accuracy, 0.0, 1.0)  # Invert to get accuracy
+
+    return scaled_accuracy
+
+
+
+
 
 
 class CustomPINNModel(tf.keras.Model):
@@ -57,15 +69,15 @@ class CustomPINNModel(tf.keras.Model):
         # Initialize min/max tracking variables
         self.min_total_loss = tf.Variable(tf.float32.max, trainable=False)
         self.max_total_loss = tf.Variable(tf.float32.min, trainable=False)
-        self.min_total_accuracy_T = tf.Variable(tf.float32.max, trainable=False)
-        self.max_total_accuracy_T = tf.Variable(tf.float32.min, trainable=False)
-        self.min_total_accuracy_B = tf.Variable(tf.float32.max, trainable=False)
-        self.max_total_accuracy_B = tf.Variable(tf.float32.min, trainable=False)
+        self.min_total_accuracy_T = tf.Variable(0.0, trainable=False)
+        self.max_total_accuracy_T = tf.Variable(5000.0, trainable=False)  # Adjust based on regolith temperature range
+        self.min_total_accuracy_B = tf.Variable(0.0, trainable=False)
+        self.max_total_accuracy_B = tf.Variable(1.0, trainable=False)
 
         # Scaling factors for loss components
-        self.scale_mse_T = 1.0
+        self.scale_mse_T = 0.01  # Decreased influence of temperature loss
         self.scale_mse_B = 1.0
-        self.scale_physics = 10.0  # Increased scaling factor for physics loss
+        self.scale_physics = 10.0
 
         # Regularization parameter
         self.reg_lambda = 0.01
@@ -298,21 +310,26 @@ class CustomPINNModel(tf.keras.Model):
 
         tf.print("compute_loss - y_true_T shape:", tf.shape(y_true_T))
         tf.print("compute_loss - y_true_B shape:", tf.shape(y_true_B))
-        tf.print("compute_loss - is_temp_boundary shape:", tf.shape(is_temp_boundary))
-        tf.print("compute_loss - is_phase_boundary shape:", tf.shape(is_phase_boundary))
 
         # Reshape masks to match y_true shape
         is_temp_boundary = tf.reshape(is_temp_boundary, [-1])
         is_phase_boundary = tf.reshape(is_phase_boundary, [-1])
 
-        tf.print("compute_loss - is_temp_boundary shape after reshaping:", tf.shape(is_temp_boundary))
-        tf.print("compute_loss - is_phase_boundary shape after reshaping:", tf.shape(is_phase_boundary))
-
         # Apply the masks
         y_true_T_masked = tf.boolean_mask(y_true_T, is_temp_boundary)
         y_pred_T_masked = tf.boolean_mask(y_pred_T, is_temp_boundary)
+
+        # Add these debug prints
+        tf.print("compute_loss - y_true_T_masked range:", tf.reduce_min(y_true_T_masked),
+                 tf.reduce_max(y_true_T_masked))
+        tf.print("compute_loss - y_pred_T_masked range:", tf.reduce_min(y_pred_T_masked),
+                 tf.reduce_max(y_pred_T_masked))
+
         y_true_B_masked = tf.boolean_mask(y_true_B, is_phase_boundary)
         y_pred_B_masked = tf.boolean_mask(y_pred_B, is_phase_boundary)
+        # Apply the masks
+        y_true_T_masked = tf.boolean_mask(y_true_T, is_temp_boundary)
+        y_pred_T_masked = tf.boolean_mask(y_pred_T, is_temp_boundary)
 
         # Debug prints for masked values
         tf.print("compute_loss - y_true_T_masked:", y_true_T_masked)
@@ -340,6 +357,7 @@ class CustomPINNModel(tf.keras.Model):
         current_min = getattr(self, min_attr)
         current_max = getattr(self, max_attr)
 
+        # Update only if the new value expands the range
         new_min = tf.minimum(current_min, value)
         new_max = tf.maximum(current_max, value)
 
@@ -349,7 +367,6 @@ class CustomPINNModel(tf.keras.Model):
         # Print updated values for debugging
         tf.print(f"Updated {min_attr}: {new_min}")
         tf.print(f"Updated {max_attr}: {new_max}")
-
 
     @tf.function
     def train_step(self, data):
@@ -363,22 +380,34 @@ class CustomPINNModel(tf.keras.Model):
         grads = tape.gradient(total_loss, self.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
 
-        raw_accuracy_T = custom_accuracy(targets['temperature_output'], y_pred['temperature_output'])
-        raw_accuracy_B = custom_accuracy(targets['boundary_output'], y_pred['boundary_output'])
+        # Calculate scaled accuracies using the custom_accuracy function
+        scaled_accuracy_T = custom_accuracy(
+            targets['temperature_output'], y_pred['temperature_output'],
+            self.min_total_accuracy_T, self.max_total_accuracy_T
+        )
+        scaled_accuracy_B = custom_accuracy(
+            targets['boundary_output'], y_pred['boundary_output'],
+            self.min_total_accuracy_B, self.max_total_accuracy_B
+        )
 
         # Update min and max values for total loss and accuracies
         self.update_min_max('total_loss', total_loss)
-        self.update_min_max('total_accuracy_T', raw_accuracy_T)
-        self.update_min_max('total_accuracy_B', raw_accuracy_B)
+        self.update_min_max('total_accuracy_T', scaled_accuracy_T)
+        self.update_min_max('total_accuracy_B', scaled_accuracy_B)
+
+        # Add monitoring prints
+        tf.print("Min/Max Temperature Accuracy T:", self.min_total_accuracy_T, self.max_total_accuracy_T)
+        tf.print("Min/Max Boundary Accuracy B:", self.min_total_accuracy_B, self.max_total_accuracy_B)
 
         tf.print("train_step - total_loss:", total_loss)
-        tf.print("train_step - raw_accuracy_T:", raw_accuracy_T)
-        tf.print("train_step - raw_accuracy_B:", raw_accuracy_B)
+        tf.print("train_step - scaled_loss:", self.scale_value(total_loss, self.min_total_loss, self.max_total_loss))
+        tf.print("train_step - scaled_accuracy_T:", scaled_accuracy_T)
+        tf.print("train_step - scaled_accuracy_B:", scaled_accuracy_B)
 
         return {
-            "loss": total_loss,
-            "raw_accuracy_T": raw_accuracy_T,
-            "raw_accuracy_B": raw_accuracy_B
+            "loss": self.scale_value(total_loss, self.min_total_loss, self.max_total_loss),
+            "scaled_accuracy_T": scaled_accuracy_T,
+            "scaled_accuracy_B": scaled_accuracy_B
         }
 
     def scale_value(self, value, min_value, max_value):
@@ -790,37 +819,21 @@ def train_PINN(model, x, x_boundary, y_T, y_B, epochs, mask_T, mask_B, batch_siz
     model.compile(
         optimizer=model.optimizer,
         loss=loss_fn,
-        metrics={'temperature_output': custom_accuracy, 'boundary_output': custom_accuracy}
+        metrics={'scaled_accuracy_T': custom_accuracy, 'scaled_accuracy_B': custom_accuracy}
     )
 
     # Explicitly build the model after compiling
     model.build(input_shape={'temperature_input': x.shape, 'boundary_input': x_boundary.shape})
 
+    # Training loop
     history = model.fit(x=inputs, y=targets, sample_weight=sample_weights, epochs=epochs, batch_size=batch_size)
     print(f"Debug: History keys: {history.history.keys()}")
 
     loss_values = history.history.get('loss', [])
 
     # Retrieve accuracy metrics from the history object
-    raw_accuracy_values_T = history.history.get('raw_accuracy_T', [])
-    raw_accuracy_values_B = history.history.get('raw_accuracy_B', [])
-
-    # Update min and max values for scaling
-    if loss_values:
-        model.update_min_max('total_loss', tf.reduce_min(loss_values))
-        model.update_min_max('total_loss', tf.reduce_max(loss_values))
-
-    if raw_accuracy_values_T:
-        model.update_min_max('total_accuracy_T', tf.reduce_min(raw_accuracy_values_T))
-        model.update_min_max('total_accuracy_T', tf.reduce_max(raw_accuracy_values_T))
-
-    if raw_accuracy_values_B:
-        model.update_min_max('total_accuracy_B', tf.reduce_min(raw_accuracy_values_B))
-        model.update_min_max('total_accuracy_B', tf.reduce_max(raw_accuracy_values_B))
-
-    # Use the raw accuracy values directly, since scaling is now handled in custom_accuracy
-    scaled_accuracy_values_T = raw_accuracy_values_T
-    scaled_accuracy_values_B = raw_accuracy_values_B
+    scaled_accuracy_values_T = history.history.get('scaled_accuracy_T', [])
+    scaled_accuracy_values_B = history.history.get('scaled_accuracy_B', [])
 
     if not loss_values:
         print("Debug: Loss values are empty. Check if the loss function is correctly implemented and called.")
@@ -833,16 +846,14 @@ def train_PINN(model, x, x_boundary, y_T, y_B, epochs, mask_T, mask_B, batch_siz
     Temperature_pred = model_output['temperature_output']
     Boundary_pred = model_output['boundary_output']
 
-    # Debugging prints before return
     print(f"Debug (train_PINN): Scaled Accuracy T values: {scaled_accuracy_values_T}")
-    print(f"Debug (train_PINN): Raw Accuracy T values: {raw_accuracy_values_T}")
     print(f"Debug (train_PINN): Scaled Accuracy B values: {scaled_accuracy_values_B}")
-    print(f"Debug (train_PINN): Raw Accuracy B values: {raw_accuracy_values_B}")
 
     return loss_values, {
         'scaled_accuracy_T': scaled_accuracy_values_T,
         'scaled_accuracy_B': scaled_accuracy_values_B
     }, Temperature_pred, Boundary_pred
+
 
 
 # For gradient plotting

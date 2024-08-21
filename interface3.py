@@ -254,13 +254,22 @@ class App:
     def handle_gold_standard_selection(self, selected_solution):
         self.gold_standard = selected_solution
         self.set_gold_standard_temp_array(self.gold_standard)
+
+        if self.gold_standard_temp_array is None:
+            print(f"Error: Selected solution '{selected_solution}' does not have a valid temperature array.")
+            return
+
         self.prepare_PINN_model_and_train()
 
     def set_gold_standard_temp_array(self, selected_solution):
-        self.gold_standard_temp_array = self.temperature_solutions.get(selected_solution, None)
-        self.temp_mask_array = self.temp_mask_arrays.get(selected_solution, None)
-        self.bound_mask_array = self.bound_mask_arrays.get(selected_solution, None)
-        self.moving_boundary_indices_to_display = self.moving_boundary_indices.get(selected_solution, None)
+        self.gold_standard_temp_array = self.temperature_solutions.get(selected_solution)
+        if self.gold_standard_temp_array is None:
+            print(f"Error: No temperature array found for the selected solution '{selected_solution}'.")
+            return
+
+        self.temp_mask_array = self.temp_mask_arrays.get(selected_solution)
+        self.bound_mask_array = self.bound_mask_arrays.get(selected_solution)
+        self.moving_boundary_indices_to_display = self.moving_boundary_indices.get(selected_solution)
 
     def prompt_for_gold_standard(self):
         self.gold_standard_window = GoldStandardSelectionWindow(self.root, self.handle_gold_standard_selection)
@@ -310,25 +319,27 @@ class App:
         self.initial_data_B = (self.x_boundary, self.y_B)
 
         # Numerical solution
-        print("Debug: Calculating numerical solution")
         self.T_arr_numerical, self.temp_mask_arrays["Numerical"], self.bound_mask_arrays[
             "Numerical"], moving_boundary_indices_numerical = self.pcm.explicitNumerical(
-            self.x_grid, self.t_grid, self.T_arr.copy(), self.pcm, self.temp_mask_arrays["Numerical"],
-            self.bound_mask_arrays["Numerical"])
-        self.temperature_solutions["Numerical"] = self.T_arr_numerical
+            self.x_grid, self.t_grid, self.T_arr.copy(), self.pcm)
 
-        # print(f"Debug: temp_mask_arrays[\"Numerical\"]:\n{self.temp_mask_arrays['Numerical']}")
-        # print(f"Debug: bound_mask_arrays[\"Numerical\"]:\n{self.bound_mask_arrays['Numerical']}")
+        # Call compute_mask_arrays separately after obtaining T_arr_numerical and H_arr
+        self.temp_mask_arrays["Numerical"], self.bound_mask_arrays["Numerical"] = compute_mask_arrays(
+            self.T_arr_numerical[:, -1], self.H_arr[:, -1], self.pcm)
+
+        # Check for empty mask arrays
+        if np.all(self.temp_mask_arrays["Numerical"] == 0) or np.all(self.bound_mask_arrays["Numerical"] == 0):
+            print(
+                "Warning: Numerical solution mask arrays are empty. Check the temperature evolution and masking logic.")
+
+        self.temperature_solutions["Numerical"] = self.T_arr_numerical
 
         # Analytical solution
         print("Debug: Calculating analytical solution")
         self.T_arr_analytical = self.pcm.analyticalSol(self.x_grid, self.t_grid, self.pcm)
         self.temp_mask_arrays["Analytical"], self.bound_mask_arrays["Analytical"] = compute_mask_arrays(
-            self.T_arr_analytical[:, -1], self.pcm)
+            self.T_arr_analytical[:, -1], self.H_arr[:, -1], self.pcm)
         self.temperature_solutions["Analytical"] = self.T_arr_analytical
-
-        # print(f"Debug: temp_mask_arrays[\"Analytical\"]:\n{self.temp_mask_arrays['Analytical']}")
-        # print(f"Debug: bound_mask_arrays[\"Analytical\"]:\n{self.bound_mask_arrays['Analytical']}")
 
         try:
             print("Debug: Calculating moving boundary indices for analytical solution")
@@ -336,21 +347,30 @@ class App:
                                                                                      T=self.T_arr_analytical,
                                                                                      T_m=self.pcm.T_m,
                                                                                      mode='moving_boundary')
-            # print(f"Debug: Moving boundary indices (analytical) = {moving_boundary_indices_analytical}")
         except Exception as e:
             print(f"Error in calculating moving boundary indices (analytical): {e}")
             return
 
         # Implicit solution
         print("Debug: Calculating implicit solution")
-        self.T_arr_implicit, self.H_arr_final, self.temp_mask_arrays["Implicit"], self.bound_mask_arrays[
-            "Implicit"], moving_boundary_indices_implicit = self.pcm.implicitSol(
-            self.x_grid, self.t_grid, self.T_arr.copy(), self.H_arr.copy(), self.pcm, self.temp_mask_arrays["Implicit"],
-            self.bound_mask_arrays["Implicit"])
-        self.temperature_solutions["Implicit"] = self.T_arr_implicit
+        try:
+            self.T_arr_implicit, self.H_arr_final, self.temp_mask_arrays["Implicit"], self.bound_mask_arrays[
+                "Implicit"], moving_boundary_indices_implicit = self.pcm.implicitSol(
+                self.x_grid, self.t_grid, self.T_arr.copy(), self.H_arr.copy(), self.pcm)
 
-        print(f"Debug: temp_mask_arrays[\"Implicit\"]:\n{self.temp_mask_arrays['Implicit']}")
-        print(f"Debug: bound_mask_arrays[\"Implicit\"]:\n{self.bound_mask_arrays['Implicit']}")
+            # Call compute_mask_arrays separately after obtaining T_arr_implicit and H_arr_final
+            self.temp_mask_arrays["Implicit"], self.bound_mask_arrays["Implicit"] = compute_mask_arrays(
+                self.T_arr_implicit[:, -1], self.H_arr_final[:, -1], self.pcm)
+
+            self.temperature_solutions["Implicit"] = self.T_arr_implicit
+
+            print(f"Debug: temp_mask_arrays[\"Implicit\"]:\n{self.temp_mask_arrays['Implicit']}")
+            print(f"Debug: bound_mask_arrays[\"Implicit\"]:\n{self.bound_mask_arrays['Implicit']}")
+        except Exception as e:
+            print(f"Error in calculating implicit solution: {e}")
+            self.T_arr_implicit = None  # Ensure T_arr_implicit is always defined
+            self.H_arr_final = None  # Ensure H_arr_final is always defined
+            moving_boundary_indices_implicit = None
 
         # Update moving boundary indices
         print("Debug: Updating moving boundary indices")
@@ -367,42 +387,50 @@ class App:
         print(f"Debug: Selected solution type = {selected_solution}")
 
         if selected_solution == "Analytical":
-            self.T_arr_to_display = self.T_arr_analytical
-            self.temp_mask_array = self.temp_mask_arrays["Analytical"]
-            self.bound_mask_array = self.bound_mask_arrays["Analytical"]
-            self.moving_boundary_indices_to_display = self.moving_boundary_indices["Analytical"]
+            if self.T_arr_analytical is not None:
+                self.T_arr_to_display = self.T_arr_analytical
+                self.temp_mask_array = self.temp_mask_arrays["Analytical"]
+                self.bound_mask_array = self.bound_mask_arrays["Analytical"]
+                self.moving_boundary_indices_to_display = self.moving_boundary_indices["Analytical"]
+            else:
+                print("Warning: Analytical solution data is not available.")
         elif selected_solution == "Numerical":
-            self.T_arr_to_display = self.T_arr_numerical
-            self.temp_mask_array = self.temp_mask_arrays["Numerical"]
-            self.bound_mask_array = self.bound_mask_arrays["Numerical"]
-            self.moving_boundary_indices_to_display = self.moving_boundary_indices["Numerical"]
+            if self.T_arr_numerical is not None:
+                self.T_arr_to_display = self.T_arr_numerical
+                self.temp_mask_array = self.temp_mask_arrays["Numerical"]
+                self.bound_mask_array = self.bound_mask_arrays["Numerical"]
+                self.moving_boundary_indices_to_display = self.moving_boundary_indices["Numerical"]
+            else:
+                print("Warning: Numerical solution data is not available.")
         elif selected_solution == "Implicit":
-            self.T_arr_to_display = self.T_arr_implicit
-            self.temp_mask_array = self.temp_mask_arrays["Implicit"]
-            self.bound_mask_array = self.bound_mask_arrays["Implicit"]
-            self.moving_boundary_indices_to_display = self.moving_boundary_indices["Implicit"]
-        # elif selected_solution == "Enthalpy Method":
-        #     self.T_arr_to_display = self.T_arr_enth
-        #     self.temp_mask_array = self.temp_mask_arrays["Enthalpy Method"]
-        #     self.bound_mask_array = self.bound_mask_arrays["Enthalpy Method"]
-        #     self.moving_boundary_indices_to_display = self.moving_boundary_indices["Enthalpy Method"]
+            if self.T_arr_implicit is not None:
+                self.T_arr_to_display = self.T_arr_implicit
+                self.temp_mask_array = self.temp_mask_arrays["Implicit"]
+                self.bound_mask_array = self.bound_mask_arrays["Implicit"]
+                self.moving_boundary_indices_to_display = self.moving_boundary_indices["Implicit"]
+            else:
+                print("Warning: Implicit solution data is not available.")
         elif selected_solution == "PINN":
             self.prompt_for_gold_standard()
 
-        # print(f"Debug: self.T_arr_to_display shape = {self.T_arr_to_display.shape}")
-        # print(f"Debug: self.temp_mask_array shape = {self.temp_mask_array.shape}")
-        # print(f"Debug: self.bound_mask_array shape = {self.bound_mask_array.shape}")
-        # print(f"Debug: self.moving_boundary_indices_to_display shape = {self.moving_boundary_indices_to_display.shape}")
-
-        self.update_plots()
+        if self.T_arr_to_display is not None:
+            self.update_plots()
+        else:
+            print("Error: No solution data available for plotting.")
 
     def prepare_PINN_model_and_train(self):
+        # Check if gold_standard_temp_array is None
+        if self.gold_standard_temp_array is None:
+            print(
+                "Error: gold_standard_temp_array is None. Ensure that a valid solution is selected as the gold standard.")
+            return
+
         self.x_input = self.x
         self.x_boundary_input = self.x_boundary
         self.boundary_indices = self.moving_boundary_indices_to_display
 
         self.batch_size = min(1024, self.x_input.shape[0])
-        self.moving_boundary_locations = self.moving_boundary_indices_to_display
+        self.moving_boundary_locations = self.boundary_indices
 
         self.indices = list(range(len(self.t_grid)))
         self.true_boundary_times = np.array(self.indices) * self.pcm.dt
@@ -411,9 +439,11 @@ class App:
             print("Error: bound_mask_array or temp_mask_array is None")
             return
 
+        # Flattening the gold standard temperature array
         self.y_T = self.gold_standard_temp_array.flatten()
         self.y_B = np.zeros_like(self.y_T)
 
+        # Resize masks to match y_T
         self.temp_mask_array = np.resize(self.temp_mask_array.flatten(), self.y_T.shape)
         self.bound_mask_array = np.resize(self.bound_mask_array.flatten(), self.y_T.shape)
 
@@ -424,15 +454,6 @@ class App:
         self.y_B = self.y_B[:min_length]
         self.temp_mask_array = self.temp_mask_array[:min_length]
         self.bound_mask_array = self.bound_mask_array[:min_length]
-
-        # print(f"Debug: x_input shape = {self.x_input.shape}")
-        # print(f"Debug: x_boundary_input shape = {self.x_boundary_input.shape}")
-        # print(f"Debug: y_T shape = {self.y_T.shape}")
-        # print(f"Debug: y_B shape = {self.y_B.shape}")
-        # print(f"Debug: temp_mask_array shape = {self.temp_mask_array.shape}")
-        # print(f"Debug: bound_mask_array shape = {self.bound_mask_array.shape}")
-        # print(f"Debug: temp_mask_array: {self.temp_mask_array}")
-        # print(f"Debug: bound_mask_array: {self.bound_mask_array}")
 
         self.model = CustomPINNModel(
             input_dim=2,
@@ -497,12 +518,11 @@ class App:
         # Update 3D surface plot
         self.update_surface_plot(self.x_grid, self.t_grid, self.T_arr_to_display)
 
-        # Compute temperature from enthalpy for the current time step
-        # H_current = self.H_arr[:, t_idx]
-        # T_current = self.pcm.update_temperature(H_current, self.pcm)
-
-        # Update T(E) plot
-        self.update_line_plot(self.H_arr_final, self.T_arr_to_display)
+        # Safely access H_arr_final
+        if self.H_arr_final is not None:
+            self.update_line_plot(self.H_arr_final, self.T_arr_to_display)
+        else:
+            print("Warning: H_arr_final is not available, skipping update.")
 
         self.canvas1.draw()
         self.canvas2.draw()
@@ -585,6 +605,9 @@ class App:
         ax3.set_ylabel('t')
         ax3.set_zlabel('Temperature')
 
+        # Save the ax3 plot to a PNG file
+        ax3.figure.savefig('PINN_temperature_surface.png', dpi=300)
+
         # Reshape Boundary_pred to match the dimensions of x_grid and t_grid
         Boundary_pred_reshaped = self.Boundary_pred.reshape((x_dim, t_dim))
         # Select the last time step
@@ -630,8 +653,8 @@ class App:
     def update_surface_plot(self, x_grid, t_arr_final, T_arr_to_display):
         self.ax2.cla()
         x_dim, t_dim = len(x_grid), len(t_arr_final)
-        # print(
-        #     f"Debug: update_surface_plot - x_dim: {x_dim}, t_dim: {t_dim}, T_arr_to_display shape: {T_arr_to_display.shape}")
+        # print( f"Debug: update_surface_plot - x_dim: {x_dim}, t_dim: {t_dim}, T_arr_to_display shape: {
+        # T_arr_to_display.shape}")
 
         try:
             if T_arr_to_display.shape[1] != t_dim:
