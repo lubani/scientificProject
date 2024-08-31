@@ -25,3 +25,24 @@ The application simulates the latent heat thermal energy storage in lunar regoli
 - **`interface3.py`:** The main file containing the GUI and the application logic.
 - **`deepLearning.py`:** Contains the PINN model architecture and training functions.
 - **`backend.py`:** Includes utility functions and additional computational methods.
+
+### How to Run the Program
+
+1. **Ensure Prerequisites Are Met:**
+   - **Docker Desktop**: Make sure Docker Desktop is installed and running on your system.
+   - **Xming (Windows users)**: Install and run Xming to display GUI applications. Configure it to allow external connections.
+   - **X Server for Linux/macOS**: Ensure X11 (Linux) or XQuartz (macOS) is installed and running for GUI display.
+
+2. **Pull the Docker image from Google Cloud Container Registry:**
+    
+    ```commandline
+   docker pull gcr.io/sonic-cumulus-357519/scientific-project
+    ```
+3. **Run the Docker container:**
+
+    ```commandline
+   docker run -it --rm -e DISPLAY=host.docker.internal:0.0 gcr.io/sonic-cumulus-357519/scientific-project
+    ```
+   
+4. **Display Configuration:**
+   - Ensure the DISPLAY environment variable is correctly set for your operating system to connect to the X server (e.g., DISPLAY=host.docker.internal:0.0 for Windows users).

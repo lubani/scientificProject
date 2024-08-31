@@ -35,7 +35,7 @@ from scipy.sparse import lil_matrix, csc_matrix
 #     # print(f"boundary_mask: {np.unique(boundary_mask, return_counts=True)}")
 #
 #     return phase_mask, boundary_mask
-def compute_mask_arrays(T, H, cls, tolerance=100, phase_mask=None, boundary_mask=None):
+def compute_mask_arrays(T, H, cls, tolerance=10, phase_mask=None, boundary_mask=None):
     if phase_mask is None:
         phase_mask = np.zeros_like(T, dtype=int)
     if boundary_mask is None:
@@ -47,23 +47,22 @@ def compute_mask_arrays(T, H, cls, tolerance=100, phase_mask=None, boundary_mask
     # Calculate the latent heat enthalpy value
     H_latent = cls.LH * cls.rho
 
-    # Initialize phase mask based on enthalpy
+    # Initialize phase mask based on enthalpy and temperature
     phase_mask[:] = 0
-    phase_mask[H < H_latent - tolerance] = 0  # Solid phase
-    phase_mask[(H >= H_latent - tolerance) & (H <= H_latent + tolerance)] = 1  # Mushy zone (phase transition)
+    phase_mask[
+        (H >= H_latent - tolerance) & (H <= H_latent + tolerance) & (T >= T_minus) & (T <= T_plus)] = 1  # Mushy zone
     phase_mask[H > H_latent + tolerance] = 2  # Liquid phase
+    phase_mask[H < H_latent - tolerance] = 0  # Solid phase
 
-    # Initialize boundary mask
+    # Initialize boundary mask based on phase change boundaries
     boundary_mask[:] = 0
     boundary_mask[phase_mask == 1] = 1  # Mark where phase change occurs
 
     # Debugging prints to check mask values
-    print(f"compute_mask_arrays: H_min = {H.min()}, H_max = {H.max()}")
     print(f"compute_mask_arrays: phase_mask counts = {np.bincount(phase_mask.flatten())}")
     print(f"compute_mask_arrays: boundary_mask counts = {np.bincount(boundary_mask.flatten())}")
 
     return phase_mask, boundary_mask
-
 
 
 class PCM(ABC):
@@ -355,23 +354,25 @@ class PCM(ABC):
         return H, T
 
     def calcEnergySufficiency(self, H_vals):
-        E_vals = H_vals  # Enthalpy is the energy
+        E_vals = H_vals  # Enthalpy is the energy in kJ
 
-        P_settlement = 100  # Power requirement for the settlement in kW
-        time_hours = 29.5 * 24  # Full lunar day-night cycle in hours
+        P_settlement = 50  # Power requirement for the settlement in kW
+        time_hours = 14.75 * 24  # Half of a lunar day-night cycle (only day or night) in hours
 
-        # Energy needed for the settlement over the full lunar day-night cycle
-        E_settlement = P_settlement * time_hours  # in kWh
-        # E_settlement *= 3.6e6  # convert to J
+        # Energy needed for the settlement over the adjusted lunar day-night cycle directly in kJ
+        E_settlement = P_settlement * time_hours * 3.6e3  # Convert kWh to kJ
 
-        # Total energy stored in the regolith over the full lunar day-night cycle
-        E_regolith_total = np.sum(E_vals)  # in J
+        # Total energy stored in the regolith over the adjusted cycle, assuming E_vals is already in kJ
+        E_regolith_total = np.sum(E_vals)  # Directly use the values without further conversion
 
-        # Conclusion
+        # Formulate the result string
+        result_string = f"Energy needed: {E_settlement:.0f} kJ, Energy calculated: {E_regolith_total:.0f} kJ. "
         if E_regolith_total >= E_settlement:
-            return "The thermal energy in the regolith is sufficient to power the settlement."
+            result_string += "The thermal energy in the regolith is sufficient to power the settlement."
         else:
-            return "The thermal energy in the regolith is not sufficient to power the settlement."
+            result_string += "The thermal energy in the regolith is not sufficient to power the settlement."
+
+        return result_string
 
     def analyticalSol(self, x_val, t_arr, cls):
         T_initial = cls.T_a
@@ -413,7 +414,7 @@ class Regolith(PCM):
     LH = 1429   # Latent heat in J/kg
     rho = 1.8   # Density in kg/m³
     T_a = 253   # Ambient temperature in Kelvin
-    cycle_duration = 708  # Lunar cycle duration in seconds
+    cycle_duration = 708  # Lunar cycle duration
 
     def __init__(self):
         self.dx = 0.15  # Spatial step
@@ -474,7 +475,6 @@ class Regolith(PCM):
 
         return x_features, y_T, y_B, x_boundary, x_grid, t_grid, T_arr, H_arr
 
-
     def explicitNumerical(self, x_arr, t_arr, T_arr, cls, phase_mask_array=None, boundary_mask_array=None):
         nx = len(x_arr)
         num_timesteps = len(t_arr)
@@ -500,10 +500,10 @@ class Regolith(PCM):
             T_new = T_old + (alpha * cls.dt / cls.dx ** 2) * diffusive_term
 
             # Debug print statements to check temperature evolution
-            print(f"Timestep {timestep}: max T_old = {np.max(T_old)}, min T_old = {np.min(T_old)}")
-            print(
-                f"Timestep {timestep}: max diffusive_term = {np.max(diffusive_term)}, min diffusive_term = {np.min(diffusive_term)}")
-            print(f"Timestep {timestep}: max T_new = {np.max(T_new)}, min T_new = {np.min(T_new)}")
+            # print(f"Timestep {timestep}: max T_old = {np.max(T_old)}, min T_old = {np.min(T_old)}")
+            # print(
+            #     f"Timestep {timestep}: max diffusive_term = {np.max(diffusive_term)}, min diffusive_term = {np.min(diffusive_term)}")
+            # print(f"Timestep {timestep}: max T_new = {np.max(T_new)}, min T_new = {np.min(T_new)}")
 
             # Update temperature at the boundary
             heat_source = cls.heat_source_function(0, t_arr[timestep], cls.cycle_duration, heat_source_max=10)
@@ -517,8 +517,8 @@ class Regolith(PCM):
             T_new = np.clip(T_new, cls.T_a, max_temperature)
 
             # More debug prints to monitor boundary conditions and heat source effects
-            print(f"Timestep {timestep}: T_new[0] = {T_new[0]}, T_new[-1] = {T_new[-1]}")
-            print(f"Timestep {timestep}: heat_source = {heat_source}")
+            # print(f"Timestep {timestep}: T_new[0] = {T_new[0]}, T_new[-1] = {T_new[-1]}")
+            # print(f"Timestep {timestep}: heat_source = {heat_source}")
 
             T_arr[:, timestep] = T_new
 

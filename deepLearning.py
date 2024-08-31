@@ -305,47 +305,26 @@ class CustomPINNModel(tf.keras.Model):
         y_pred_B = y_pred['boundary_output']
 
         batch_size = tf.shape(y_true_T)[0]
-        is_temp_boundary = self.temp_mask_array[:batch_size]
-        is_phase_boundary = self.bound_mask_array[:batch_size]
-
-        tf.print("compute_loss - y_true_T shape:", tf.shape(y_true_T))
-        tf.print("compute_loss - y_true_B shape:", tf.shape(y_true_B))
-
-        # Reshape masks to match y_true shape
-        is_temp_boundary = tf.reshape(is_temp_boundary, [-1])
-        is_phase_boundary = tf.reshape(is_phase_boundary, [-1])
+        is_temp_boundary = tf.reshape(self.temp_mask_array[:batch_size], [-1])
+        is_phase_boundary = tf.reshape(self.bound_mask_array[:batch_size], [-1])
 
         # Apply the masks
         y_true_T_masked = tf.boolean_mask(y_true_T, is_temp_boundary)
         y_pred_T_masked = tf.boolean_mask(y_pred_T, is_temp_boundary)
-
-        # Add these debug prints
-        tf.print("compute_loss - y_true_T_masked range:", tf.reduce_min(y_true_T_masked),
-                 tf.reduce_max(y_true_T_masked))
-        tf.print("compute_loss - y_pred_T_masked range:", tf.reduce_min(y_pred_T_masked),
-                 tf.reduce_max(y_pred_T_masked))
-
         y_true_B_masked = tf.boolean_mask(y_true_B, is_phase_boundary)
         y_pred_B_masked = tf.boolean_mask(y_pred_B, is_phase_boundary)
-        # Apply the masks
-        y_true_T_masked = tf.boolean_mask(y_true_T, is_temp_boundary)
-        y_pred_T_masked = tf.boolean_mask(y_pred_T, is_temp_boundary)
 
-        # Debug prints for masked values
+        # Debugging prints for masked values
         tf.print("compute_loss - y_true_T_masked:", y_true_T_masked)
         tf.print("compute_loss - y_pred_T_masked:", y_pred_T_masked)
         tf.print("compute_loss - y_true_B_masked:", y_true_B_masked)
         tf.print("compute_loss - y_pred_B_masked:", y_pred_B_masked)
 
-        if tf.size(y_true_B_masked) == 0:
-            tf.print("Warning: y_true_B_masked is empty. Check phase boundary mask.")
-
-        if tf.size(y_pred_B_masked) == 0:
-            tf.print("Warning: y_pred_B_masked is empty. Check phase boundary mask.")
-
+        # Calculate MSE loss
         mse_loss_T = tf.reduce_mean(tf.square(y_true_T_masked - y_pred_T_masked))
-        mse_loss_B = tf.constant(0.0, dtype=tf.float32) if tf.size(y_true_B_masked) == 0 or tf.size(
-            y_pred_B_masked) == 0 else tf.reduce_mean(tf.square(y_true_B_masked - y_pred_B_masked))
+        mse_loss_B = tf.reduce_mean(tf.square(y_true_B_masked - y_pred_B_masked)) if tf.size(
+            y_true_B_masked) > 0 else tf.constant(0.0, dtype=tf.float32)
+
         mse_loss = mse_loss_T + mse_loss_B
 
         return mse_loss_T, mse_loss_B
@@ -767,6 +746,7 @@ def train_PINN(model, x, x_boundary, y_T, y_B, epochs, mask_T, mask_B, batch_siz
     print(f"Debug: Initial mask_T shape = {mask_T.shape}")
     print(f"Debug: Initial mask_B shape = {mask_B.shape}")
 
+    # Ensure no NaN values are present
     assert not np.isnan(x).any(), "x contains NaN values"
     assert not np.isnan(x_boundary).any(), "x_boundary contains NaN values"
     assert not np.isnan(y_T).any(), "y_T contains NaN values"
@@ -774,15 +754,18 @@ def train_PINN(model, x, x_boundary, y_T, y_B, epochs, mask_T, mask_B, batch_siz
     assert not np.isnan(mask_T).any(), "mask_T contains NaN values"
     assert not np.isnan(mask_B).any(), "mask_B contains NaN values"
 
-    min_length = min(x.shape[0], y_T.shape[0], y_B.shape[0])
+    # Determine the minimum length among all inputs
+    min_length = min(x.shape[0], y_T.shape[0], y_B.shape[0], mask_T.shape[0], mask_B.shape[0])
+
+    # Trim arrays to match the minimum length
     x = x[:min_length]
     x_boundary = x_boundary[:min_length]
     y_T = y_T[:min_length]
     y_B = y_B[:min_length]
-    mask_T = np.resize(mask_T, (min_length,))
-    mask_B = np.resize(mask_B, (min_length,))
+    mask_T = mask_T[:min_length]
+    mask_B = mask_B[:min_length]
 
-    # Debugging prints
+    # Debugging prints after trimming
     print(f"Debug: Trimmed x shape = {x.shape}")
     print(f"Debug: Trimmed x_boundary shape = {x_boundary.shape}")
     print(f"Debug: Trimmed y_T shape = {y_T.shape}")
@@ -790,11 +773,7 @@ def train_PINN(model, x, x_boundary, y_T, y_B, epochs, mask_T, mask_B, batch_siz
     print(f"Debug: Trimmed mask_T shape = {mask_T.shape}")
     print(f"Debug: Trimmed mask_B shape = {mask_B.shape}")
 
-    sample_weights = {
-        'temperature_output': mask_T,
-        'boundary_output': mask_B
-    }
-
+    # Create inputs and targets dictionaries for the model
     inputs = {
         'temperature_input': x,
         'boundary_input': x_boundary
@@ -803,6 +782,11 @@ def train_PINN(model, x, x_boundary, y_T, y_B, epochs, mask_T, mask_B, batch_siz
     targets = {
         'temperature_output': y_T,
         'boundary_output': y_B
+    }
+
+    sample_weights = {
+        'temperature_output': mask_T,
+        'boundary_output': mask_B
     }
 
     # Use the stefan_loss_wrapper to compile the model
@@ -853,6 +837,7 @@ def train_PINN(model, x, x_boundary, y_T, y_B, epochs, mask_T, mask_B, batch_siz
         'scaled_accuracy_T': scaled_accuracy_values_T,
         'scaled_accuracy_B': scaled_accuracy_values_B
     }, Temperature_pred, Boundary_pred
+
 
 
 

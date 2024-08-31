@@ -236,13 +236,25 @@ class App:
         self.canvas1.get_tk_widget().grid(row=1, column=0, sticky='nsew')
         self.canvas2.get_tk_widget().grid(row=1, column=2, sticky='nsew')
 
+        # Add this to the App's __init__ method to create the label
+        self.energy_label = tk.Label(self.root, text="", bg='white', wraplength=500, justify='center')
+        self.energy_label.grid(row=2, column=0, columnspan=3, pady=10)
+
+        # Configure the frame to give all extra space to the line plot
+        self.frame.grid_rowconfigure(0, weight=1)
+        self.frame.grid_columnconfigure(0, weight=1)
+        self.frame.grid_columnconfigure(1, weight=1)
+        self.frame.grid_columnconfigure(2, weight=1)
+
         # Configure the main window to distribute extra space among the widgets
-        self.root.grid_rowconfigure(1, weight=1)
+        self.root.grid_rowconfigure(0, weight=1)  # Row for the time scale
+        self.root.grid_rowconfigure(1, weight=3)  # Row for the plots
+        self.root.grid_rowconfigure(2, weight=1)  # Row for the energy sufficiency label
+
+        self.root.grid_columnconfigure(0, weight=1)
         self.root.grid_columnconfigure(1, weight=1)
-        self.root.grid_rowconfigure(2, weight=1)
         self.root.grid_columnconfigure(2, weight=1)
-        self.root.grid_rowconfigure(3, weight=1)
-        self.root.grid_columnconfigure(3, weight=1)
+
         self.fig_PINN = plt.Figure(figsize=(15, 5), dpi=100)
         self.moving_boundary_locations = []
         self.indices = []
@@ -250,6 +262,16 @@ class App:
         self.calcAll()
         self.update_solution_type()
         self.update_plots()
+
+
+    # Call the energy calculation method and update the label with the result string
+    def update_energy_label(self):
+        # Example: Assuming self.H_arr_final contains the enthalpy values needed for the energy calculation
+        if self.H_arr_final is not None:
+            result_string = self.pcm.calcEnergySufficiency(self.H_arr_final)
+            self.energy_label.config(text=result_string)
+        else:
+            self.energy_label.config(text="No enthalpy data available for energy calculation.")
 
     def handle_gold_standard_selection(self, selected_solution):
         self.gold_standard = selected_solution
@@ -528,6 +550,9 @@ class App:
         self.canvas2.draw()
         self.canvas3.draw()
 
+        # Update the energy sufficiency message
+        self.update_energy_label()
+
     def show_PINN_plots(self, show_gold_standard=True, custom_cmap='coolwarm'):
         # Ensure the necessary data is available
         if self.Temperature_pred is None or self.Boundary_pred is None:
@@ -739,3 +764,8 @@ if __name__ == '__main__':
             print(e)
     app = App()
     app.run()  # This line should be the last one in the main block
+
+
+# docker build -t scientificproject .
+# docker run -it --rm -e DISPLAY=$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix scientificproject
+# C:\Users\libby\AppData\Roaming\Python\Python312\Scripts\pyinstaller.exe --onefile --windowed C:\Users\libby\PycharmProjects\scientificProject\interface3.py
