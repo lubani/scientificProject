@@ -484,49 +484,44 @@ class Regolith(PCM):
             boundary_mask_array = np.zeros((nx, num_timesteps), dtype=int)
 
         alpha = cls.alpha(cls.k, cls.c, cls.rho)
-        max_increase = 1000  # Example cap for temperature increase
-        moving_boundary_indices = np.full(num_timesteps, -1, dtype=int)  # Initialize moving_boundary_indices
+        max_increase = 1000.0  # Maximum temperature increase allowed
+        max_temperature = 4000.0  # Maximum temperature allowed in the system
+        moving_boundary_indices = np.full(num_timesteps, -1, dtype=int)
 
-        # Initial condition: Set the first time step
-        T_arr[:, 0] = cls.T_a  # Ambient temperature for all spatial cells
-        T_arr[0, :] = cls.T_m + 10.0  # Higher temperature at the first spatial cell
-
-        T_minus = cls.T_m - 100  # Assuming the default tolerance of 100
-        T_plus = cls.T_m + 100
+        # Initial conditions
+        T_arr[:, 0] = cls.T_a
+        T_arr[0, :] = cls.T_m + 10.0
 
         for timestep in range(1, num_timesteps):
             T_old = T_arr[:, timestep - 1]
-            diffusive_term = (np.roll(T_old, -1) - 2 * T_old + np.roll(T_old, 1))
+
+            # Compute diffusive term with proper boundary handling
+            diffusive_term = np.zeros_like(T_old)
+            diffusive_term[1:-1] = T_old[2:] - 2 * T_old[1:-1] + T_old[:-2]
+            # Apply boundary conditions
+            diffusive_term[0] = 0
+            diffusive_term[-1] = 0
+
             T_new = T_old + (alpha * cls.dt / cls.dx ** 2) * diffusive_term
 
-            # Debug print statements to check temperature evolution
-            # print(f"Timestep {timestep}: max T_old = {np.max(T_old)}, min T_old = {np.min(T_old)}")
-            # print(
-            #     f"Timestep {timestep}: max diffusive_term = {np.max(diffusive_term)}, min diffusive_term = {np.min(diffusive_term)}")
-            # print(f"Timestep {timestep}: max T_new = {np.max(T_new)}, min T_new = {np.min(T_new)}")
-
-            # Update temperature at the boundary
+            # Update temperature at the boundary with heat source
             heat_source = cls.heat_source_function(0, t_arr[timestep], cls.cycle_duration, heat_source_max=10)
             if heat_source > 0:
-                heat_contribution = min(heat_source / (cls.rho * cls.c), max_increase)
-                T_new[0] = T_old[0] + heat_contribution
+                T_new[0] += min(heat_source / (cls.rho * cls.c), max_increase)
 
-            T_new[-1] = T_old[-1]  # Maintain the last cell's temperature
+            T_new[-1] = T_old[-1]  # Keep the last cell's temperature constant
 
-            max_temperature = 4000
+            # Clip temperatures to prevent numerical issues
             T_new = np.clip(T_new, cls.T_a, max_temperature)
-
-            # More debug prints to monitor boundary conditions and heat source effects
-            # print(f"Timestep {timestep}: T_new[0] = {T_new[0]}, T_new[-1] = {T_new[-1]}")
-            # print(f"Timestep {timestep}: heat_source = {heat_source}")
 
             T_arr[:, timestep] = T_new
 
-            # Directly compute the phase mask and boundary mask in the loop
-            phase_mask_array[:, timestep] = np.where(T_new < T_minus, 0, np.where(T_new <= T_plus, 1, 2))
-            boundary_mask_array[:, timestep] = np.where(phase_mask_array[:, timestep] == 1, 1, 0)
+            # Update phase and boundary masks
+            phase_mask, boundary_mask = self.update_phase_mask(T_new, cls)
+            phase_mask_array[:, timestep] = phase_mask
+            boundary_mask_array[:, timestep] = boundary_mask
 
-            # Update moving boundary indices using the provided method
+            # Update moving boundary indices
             moving_boundary_indices[timestep] = self.calculate_boundary_indices(
                 x=x_arr,
                 x_max=x_arr[-1],

@@ -346,8 +346,8 @@ class App:
             self.x_grid, self.t_grid, self.T_arr.copy(), self.pcm)
 
         # Call compute_mask_arrays separately after obtaining T_arr_numerical and H_arr
-        self.temp_mask_arrays["Numerical"], self.bound_mask_arrays["Numerical"] = compute_mask_arrays(
-            self.T_arr_numerical[:, -1], self.H_arr[:, -1], self.pcm)
+        self.temp_mask_arrays["Numerical"], self.bound_mask_arrays["Numerical"] = self.pcm.update_phase_mask(
+            self.T_arr_numerical[:, -1], self.pcm)
 
         # Check for empty mask arrays
         if np.all(self.temp_mask_arrays["Numerical"] == 0) or np.all(self.bound_mask_arrays["Numerical"] == 0):
@@ -359,8 +359,8 @@ class App:
         # Analytical solution
         print("Debug: Calculating analytical solution")
         self.T_arr_analytical = self.pcm.analyticalSol(self.x_grid, self.t_grid, self.pcm)
-        self.temp_mask_arrays["Analytical"], self.bound_mask_arrays["Analytical"] = compute_mask_arrays(
-            self.T_arr_analytical[:, -1], self.H_arr[:, -1], self.pcm)
+        self.temp_mask_arrays["Analytical"], self.bound_mask_arrays["Analytical"] = self.pcm.update_phase_mask(
+            self.T_arr_analytical[:, -1], self.pcm)
         self.temperature_solutions["Analytical"] = self.T_arr_analytical
 
         try:
@@ -380,9 +380,9 @@ class App:
                 "Implicit"], moving_boundary_indices_implicit = self.pcm.implicitSol(
                 self.x_grid, self.t_grid, self.T_arr.copy(), self.H_arr.copy(), self.pcm)
 
-            # Call compute_mask_arrays separately after obtaining T_arr_implicit and H_arr_final
-            self.temp_mask_arrays["Implicit"], self.bound_mask_arrays["Implicit"] = compute_mask_arrays(
-                self.T_arr_implicit[:, -1], self.H_arr_final[:, -1], self.pcm)
+            # Use update_phase_mask after obtaining T_arr_implicit
+            self.temp_mask_arrays["Implicit"], self.bound_mask_arrays["Implicit"] = self.pcm.update_phase_mask(
+                self.T_arr_implicit[:, -1], self.pcm)
 
             self.temperature_solutions["Implicit"] = self.T_arr_implicit
 
